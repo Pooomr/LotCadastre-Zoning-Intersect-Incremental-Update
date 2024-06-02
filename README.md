@@ -20,5 +20,4 @@ There is a business need for the intersection results of these 2 datasets as it 
   * arcpy 
 
 ## Concept
-
-![Lot-Planning_Zone-Intersect v3 drawio](https://github.com/Pooomr/LotCadastre-Planning-Intersect-Incremental-Update/assets/140774543/7e6ade87-e15e-4ab8-a279-ed70c49ec8ae)
+![Lot-Planning_Zone-Intersect v4 drawio](https://github.com/Pooomr/LotCadastre-Planning-Intersect-Incremental-Update/assets/140774543/6669a6c1-cf61-4577-ab98-4f1a18bfddea)
