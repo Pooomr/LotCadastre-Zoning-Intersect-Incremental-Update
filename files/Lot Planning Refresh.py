@@ -1,13 +1,14 @@
 ''' Update Lot_Zone table Proof of Concept
 	v1 - First version - Select records based on last_update_date filter working
+	v1a - Unable to make tabulation work with lot layer (no OID)
 '''
 
 import logging
 import sys
-logging.basicConfig(level=logging.DEBUG)
+#logging.basicConfig(level=logging.DEBUG)
 username = sys.argv[1]
 logging.basicConfig(filename="log.txt",
-					level=logging.INFO,
+					level=logging.DEBUG,
 					format="%(asctime)s - {} - %(message)s".format(username),
 					datefmt='%d/%m/%Y %H:%M:%S')
 logging.debug("Importing Python Packages...")
@@ -16,8 +17,8 @@ logging.info("[START] Lot_Zone Update process started")
 try:
 	import arcpy
 except:
-	print("Error Importing arcpy module, make sure OpenVPN is connected!")
-	logging.info("[STOPPED] Unable to import arcpy module, GPR electorate update Stopped")
+	print("Error Importing arcpy module, make sure OpenVPN is connected and licences are available!")
+	logging.info("[STOPPED] Unable to import arcpy module, Lot Planning update Stopped")
 	sys.exit()
 
 import os
@@ -26,6 +27,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import config
 import cx_Oracle
+import requests
+import json
 
 current_update = datetime.now()
 
@@ -75,6 +78,56 @@ def connectDB(username,password):
 			
 	return connection
 
+def getRESTData(baseURL, params, serviceName):
+	
+	retries = 0
+	success = False
+	r_code = 0
+	#cafile = 'C:\TMP\Python\swg.dec.int.cer'
+	while not success:
+		try:
+			#response = requests.get(url=baseURL, params=params, verify=False)
+			response = requests.get(url=baseURL, params=params)
+			success = True
+			print("URL = {}, PARAMS = {}".format(baseURL, params))
+		except requests.exceptions.RequestException as e:
+			print(e)
+			retries += 1
+			if retries > 9:
+				while True:
+					select = input("\nRequest to {} service failed 10 times, Do you want to try again? y/n\n".format(serviceName))
+					if select == "y":
+						retries = 0
+						break
+					elif select == "n":
+						print("Lot Zoning update process Aborted!!")
+						sys.exit()
+					else:
+						print("Invalid selection. Please enter y or n")
+		
+		if response:
+			r_code = response.status_code
+		else:
+			r_code = 0
+		
+		while r_code != 200 and success:
+			print("Response code: {}".format(response.status_code))
+			select2 = input("\nInvalid response received, run query again? y/n\n")
+			if select2 == "y":
+				retries = 0
+				success = False
+				break
+			elif select2 == "n":
+				print("Lot Zoning update process Aborted!!")
+				logging.info("Lot Zoning update aborted by User")
+				sys.exit()
+			else:
+				print("Invalid selection. Please enter y or n")
+	
+	print(response.text)
+	
+	return json.loads(response.text)
+	
 if __name__ == "__main__":
 	
 	#Connect to DB
@@ -95,79 +148,82 @@ if __name__ == "__main__":
 	
 	#Connection files
 	ZoningLayer = "{}\\arcGIS\\PlanningSDE.sde\\PlanningDB.SDE.EPI\\PlanningDB.SDE.EPI_Land_Zoning".format(os.getcwd())
-	#LotLayer = "{}\\arcGIS\\DCDB_SDE.sde\\DCDB_DELIVERY.sde.LotAll".format(os.getcwd())
-	LotUrl = "https://mapprod3.environment.nsw.gov.au/arcgis/rest/services/ePlanning/Planning_Portal_Administration/MapServer/3"
-	LotLayer = arcpy.mp.MakeImageServerLayer(LotUrl) #STUCK HERE TRYING TO SORT OUT THE LOT LAYER, MAY NEED TO ADD LAYER TO MAP SIMILAR TO HOW IT IS DONE IN ARCGIS PRO DESKTOP
+	LotLayer = "{}\\arcGIS\\DCDB_SDE.sde\\DCDB_DELIVERY.sde.LotAll".format(os.getcwd())
+	LotUrl = "https://maps.six.nsw.gov.au/arcgis/rest/services/sixmaps/Cadastre/MapServer/0/query"
 	
 	#ArcPy Settings
 	logging.debug("[DEBUG] Setting up ArcGIS connection to Planning SDE")
 	env.overwriteOutput = True
-	#env.workspace = "{}\\arcGIS\\PlanningSDE.sde\\PlanningDB.SDE.EPI".format(os.getcwd())
-	#env.workspace = "{}\\arcGIS\\DCDB_SDE.sde".format(os.getcwd())
 	arcFolder = "{}\\arcGIS\\lot_zone_update.gdb".format(os.getcwd())
-	#fcList = arcpy.ListFeatureClasses()
+	LZ_to_update = "{}\\LandZoning_to_update".format(arcFolder)
 	logging.debug("[DEBUG] Connected to Planning SDE")
-
-	# if fcList == None:
-		# logging.info("[ERROR] Unable to retrieve results. Please check SDE Connection")
-		# print("Error with SDE Connection. Run 'Configure SDE Connection' to refresh connection file")
-		# sys.exit()
-
-	# #List layers
-	# for fc in fcList:
-		# print(fc)
 	
 	print("Test Selection...")
 	logging.info("[INFO] Selecting records")
 	
-	#Loop through updated Zone records one month at a time
-	start_period = last_update #start of loop
-	end_period = last_update + timedelta(days=30) #end of first chunk
-	current_update = datetime(2023, 3, 5, 12, 58, 57) #Testing
-	end_period = datetime(2023, 3, 5, 12, 58, 57) #Testing
+	print("{}".format(last_update.strftime('%Y-%m-%d %H:%M:%S')))
 	
-	#TEST LOT TABLE
-	table = arcpy.management.SelectLayerByAttribute(ZoningLayer, "NEW_SELECTION", "OBJECTID = 111", None)
-	print("Attributes selected")
-	columns = [f.name for f in arcpy.ListFields(table) if f.type!="Geometry"] 
-	df = pd.DataFrame(data=arcpy.da.SearchCursor(table, columns), columns=columns)
-
-	print(df)
+	#KEEP ZONING LAYER FOR TESTING
+	# date_range_expression = "LAST_EDITED_DATE >= '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'))
 	
-	while start_period < current_update:
-		print("{} -> {}".format(start_period,end_period))
+	# #Copy updated records to new layer 'LandZoning_to_update'
+	# arcpy.Select_analysis(ZoningLayer, "{}\\LandZoning_to_update".format(arcFolder), where_clause=date_range_expression)
+	
+	#GET LOTS FOR EACH ZONE SHAPE
+	zoneShp = 5 #Total number of zones to extract lots each round
+	count = 0 #Keep track of record count
+	geoInput = '' #Initialise string for coordinates
+	totalRecords = arcpy.management.GetCount(LZ_to_update) #Total Zone records to iterate
+	lots = list() #Store lots that intersect with zone layers
+	
+	#Go through each record in LandZoning_to_update and find intersected lots
+	with arcpy.da.SearchCursor(LZ_to_update,['OID@','SHAPE@']) as cursor:
 		
-		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(start_period.strftime('%Y-%m-%d %H:%M:%S'),end_period.strftime('%Y-%m-%d %H:%M:%S'))
-		
-		#Copy updated records to new layer 'LandZoning_to_update'
-		arcpy.Select_analysis(ZoningLayer, "{}\\LandZoning_to_update".format(arcFolder), where_clause=date_range_expression)
-		
-		#Tabulate intersect with Lot Layer to get list of lots to update
-		arcpy.analysis.TabulateIntersection("{}\\LandZoning_to_update".format(arcFolder), "OBJECTID", LotLayer, "{}\\Lots_to_update".format(arcFolder), "OBJECTID;CADID;LOTNUMBER;SECTIONNUMBER;PLANLABEL", None, None, "UNKNOWN")
-		#arcpy.management.SelectLayerByAttribute("{}\\arcGIS\\PlanningSDE.sde\\PlanningDB.SDE.EPI\\PlanningDB.SDE.EPI_Land_Zoning".format(os.getcwd()), "NEW_SELECTION", date_range_expression, None)
-		
-		#arcpy.management.CopyFeatures("{}\\arcGIS\\PlanningSDE.sde\\PlanningDB.SDE.EPI\\PlanningDB.SDE.EPI_Land_Zoning".format(os.getcwd()), "{}\\LandZoning_to_update".format(arcFolder), None, None, None, None)
-		
-		#Set up next chunk
-		start_period = end_period
-		end_period = end_period + timedelta(days=30)
+		for row in cursor:
+			sRef = row[1].extent.spatialReference.factoryCode
+			if geoInput == '':
+				geoInput = '[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
+			else:
+				geoInput += ',[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
+			
+			count += 1
+			
+			if count == 5 or count == totalRecords:
+				print('{{"rings":[{}]}}'.format(geoInput))
+				
+				params = {
+					'f':'json',
+					'outFields':'lotidstring',
+					'returnGeometry':'false',
+					'inSR':sRef,
+					'returnIdsOnly':'true',
+					'geometry':'{{"rings":[{}]}}'.format(geoInput),
+					'geometryType':'esriGeometryPolygon',
+					'spatialRel': 'esriSpatialRelIntersects'
+				}
+				
+				jsonResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
+				
+				print(jsonResult)
+				
+				#Delay calls to rest service
+				time.sleep(2)
+				
+				#Iterate through ObjectIDs and extract lot information
+				for oID in jsonResult['objectIds']:
+					print(oID)
+				
+				geoInput = ''
+				count = 0
+			#geoInput = '{{"rings":[[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]]}}'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
+	
+			
+			print("end of loop")
+			#for vertice in range(row[1].pointCount):
+				#pnt=array1.getObject(0).getObject(vertice)
+				#print(row[0],pnt.X,pnt.Y)
 	
 	print("Last_update: {}".format(last_update))
-	update_period = last_update + timedelta(days=30)
-	print("Last_update + 30: {}".format(update_period))
 	
-	#date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'),update_period.strftime('%Y-%m-%d %H:%M:%S'))
-	
-	#Testing
-	date_range_expression = "LAST_EDITED_DATE >= '2022-10-06 12:58:57' AND LAST_EDITED_DATE < '2023-03-05 12:58:57'"
-	
-	print("date_range_expression: {}".format(date_range_expression))
-	
-	table = arcpy.management.SelectLayerByAttribute("{}\\PlanningSDE.sde\\PlanningDB.SDE.EPI\\PlanningDB.SDE.EPI_Land_Zoning".format(os.getcwd()), "NEW_SELECTION", date_range_expression, None)
-	print("Attributes selected")
-	columns = [f.name for f in arcpy.ListFields(table) if f.type!="Geometry"] 
-	df = pd.DataFrame(data=arcpy.da.SearchCursor(table, columns), columns=columns)
-
-	print(df)
 	logging.info("[FINISH] Lot_Zone Update process finished")
 	print("Done!")
