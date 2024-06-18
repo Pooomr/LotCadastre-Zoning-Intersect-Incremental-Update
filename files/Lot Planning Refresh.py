@@ -6,12 +6,8 @@
 
 import logging
 import sys
-#logging.basicConfig(level=logging.DEBUG)
+
 username = sys.argv[1]
-# logging.basicConfig(filename="log.txt",
-					# level=logging.DEBUG,
-					# format="%(asctime)s - {} - %(message)s".format(username),
-					# datefmt='%d/%m/%Y %H:%M:%S')
 
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
@@ -147,12 +143,16 @@ def getRESTData(baseURL, params, serviceName):
 				sys.exit()
 			else:
 				print("Invalid selection. Please enter y or n")
-	
+	#logger.debug("REST response for: {}".format(baseURL))
+	#logger.debug("Params are {}".format(params))
+	#logger.debug("Results are {}".format(response.text))
 	return json.loads(response.text)
 	
 def createLotLayer(zoneId,baseURL):
 	#Creates Lot feature layer via JSON results
 	df_lots = pd.read_sql("select distinct lotref from LZ_LOT_SPATIAL where lz_update_log_id = {}".format(zoneId),connection)
+	
+	#logger.debug("Running createLotLayer: df_lots contains {}".format(df_lots))
 	
 	#Temporary JSON file
 	tempJSON = "{}\\arcGIS\\Temp.json".format(os.getcwd())
@@ -182,13 +182,17 @@ def createLotLayer(zoneId,baseURL):
 				'OutFields':'lotidstring',
 				'where':'lotidstring in ({})'.format(lotstring)
 			}
-						
+			
+			#TO-DO ADD RETRY MECHANISM FOR EMPTY RESULTS
 			jsonResult = getRESTData(baseURL, params, "Lot Service")
 					
 			if jsonResult.get('features'):
 				#iterate through all features in JSON response and add to Result list
 				for jr in range(len(jsonResult['features'])):
 					lotResults.append(jsonResult['features'][jr])
+			else:
+				print("ERROR: {}".format(jsonResult))
+				logger.debug("ERROR in create Lot Layer: {}".format(jsonResult))
 				
 			lotstring = ''
 			
@@ -205,6 +209,8 @@ def writeToJSON(JSONHead, tempJSON, JSONResults, layerName):
 	JSONinput += "{}".format(JSONHead)
 	totalSLots = len(JSONResults)
 	fileNum = 1
+	
+	#logger.debug("Running writeToJSON: JSONResults is {}".format(JSONResults))
 	
 	logger.debug("WRITING TO JSON... {}".format(totalSLots))
 	for i, row in enumerate(JSONResults):
@@ -249,12 +255,18 @@ def intersectLotZone(lzId,layerName):
 	logger.debug(ZoningLayer)
 	logger.debug("{}\\{}".format(arcFolder,layerName))
 	
-	c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
-	c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
-	c.execute("commit")
+	# c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
+	# c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
+	# c.execute("commit")
 	
 	logger.info("[PROCESS] Tabulate Intersection complete for lz_update_log_id: {}".format(lzId))
-	
+
+def updateLotZone():
+	#Update Lot_Zone table
+	with arcpy.da.SearchCursor("{}\\Lot_Zone_to_update".format(arcFolder)) as cur:
+		for row in cur:
+			print("{} {} {} {} {}".format(row[1],row[2],row[3],row[4]))
+			
 if __name__ == "__main__":
 	
 	# Connect to DB and create session pool
@@ -282,14 +294,16 @@ if __name__ == "__main__":
 	logger.debug("[DEBUG] Connected to Planning SDE")
 	
 	#Check if there are unprocessed lots
-	df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL order by lz_update_log_id",connection)
+	df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
 	if len(df_lz_to_process) > 0:
 		for i, to_proc in df_lz_to_process.iterrows():
 			logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
 			createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl)
 			
 			intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
-		
+	
+	#TO-DO Check if there are unprocessed Zones (to get list of lots from)
+	
 	#Get last update date of Lot_Zone
 	c.execute("select max(end_date) from LZ_UPDATE_LOG where finish_date is not null")
 	last_update_tuple = c.fetchone()
@@ -329,13 +343,13 @@ if __name__ == "__main__":
 	#Iterate through all Updated Zone layers until done
 	while last_update < current_date:
 	
-		#KEEP ZONING LAYER FOR TESTING
+		#Set Date Range for Zone selection
 		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'),end_period.strftime('%Y-%m-%d %H:%M:%S'))
 		
 		#Copy updated records to new layer 'LandZoning_to_update'
 		arcpy.Select_analysis(ZoningLayer, "{}\\LandZoning_to_update".format(arcFolder), where_clause=date_range_expression)
 		
-		totalRecords = arcpy.management.GetCount(LZ_to_update) #Total Zone records to iterate
+		totalRecords = int(arcpy.management.GetCount(LZ_to_update)[0]) #Total Zone records to iterate
 		
 		#Insert lz_update_log record and get ID
 		connection = pool.acquire() #Acquire connection from pool
@@ -348,118 +362,158 @@ if __name__ == "__main__":
 		
 		print("Last inserted ID:", lz_update_log_id)
 		
-		#GET LOTS FOR EACH ZONE SHAPE		
 		count = 0 #Keep track of record count
 		lcount = 0 #Keep track of lot count
-		geoInput = '' #Initialise string for coordinates
-		oIDInput = '' #Initialise string for Lot Object Ids
-		lots = list() #Store lots that intersect with zone layers
 		
-		logger.info("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))
-		print("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))	
-		
-		#Go through each record in LandZoning_to_update and find intersected lots
-		with arcpy.da.SearchCursor(LZ_to_update,['OID@','SHAPE@']) as cursor:
+		if totalRecords > 0:
+			#GET LOTS FOR EACH ZONE SHAPE		
 			
-			for row in cursor:
-				sRef = row[1].extent.spatialReference.factoryCode
-				if geoInput == '':
-					geoInput = '[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
-				else:
-					geoInput += ',[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
-				
-				count += 1
-				
-				if count % zoneShp == 0 or count == totalRecords:
-					params = {
-						'f':'json',
-						'outFields':'objectid',
-						'returnGeometry':'false',
-						'inSR':sRef,
-						'returnIdsOnly':'true',
-						'geometry':'{{"rings":[{}]}}'.format(geoInput),
-						'geometryType':'esriGeometryPolygon',
-						'spatialRel': 'esriSpatialRelIntersects'
-					}
-					
-					jsonResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
-					
-					#Delay calls to rest service
-					time.sleep(2)
-					
-					#Iterate through ObjectIDs and extract lot information
-					if jsonResult.get('objectIds'):
-						for oID in jsonResult['objectIds']:
-							
-							if oIDInput == '':
-								oIDInput = '{}'.format(oID)
-							else:
-								oIDInput += ",{}".format(oID)
-							
-							lcount += 1
-							
-							if lcount % lotLimit == 0 or lcount == len(jsonResult['objectIds']):
-								params = {
-									'f':'json',
-									'outFields':'lotidstring',
-									'returnGeometry':'false',
-									'returnDistinctValues':'true',
-									'where':'objectid in ({})'.format(oIDInput)
-								}
-								jsonLotResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
-								
-								if jsonLotResult.get('features'):
-									for lotref in jsonLotResult["features"]:
-										#build up list of lots to insert
-										lots.append(lotref["attributes"]["lotidstring"])
-								else:
-									print("ERROR: {}".format(jsonLotResult))
-								
-								oIDInput = '' #Reset
+			geoInput = '' #Initialise string for coordinates
+			oIDInput = '' #Initialise string for Lot Object Ids
+			lots = list() #Store lots that intersect with zone layers
+			
+			logger.info("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))
+			print("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))
+			logger.debug("Total records are {}".format(totalRecords))
+			
+			#Go through each record in LandZoning_to_update and find intersected lots
+			with arcpy.da.SearchCursor(LZ_to_update,['OID@','SHAPE@']) as cursor:
+				logger.debug("Going through Zone layers...")
+				for row in cursor:
+					sRef = row[1].extent.spatialReference.factoryCode
+					if geoInput == '':
+						geoInput = '[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
 					else:
-						print("ERROR: {}".format(jsonResult))
+						geoInput += ',[[{},{}],[{},{}],[{},{}],[{},{}],[{},{}]]'.format(row[1].extent.XMin,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMin,row[1].extent.XMax,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMax,row[1].extent.XMin,row[1].extent.YMin)
 					
-					#All Lots extracted, insert into table
-					query = "insert all "
-					c.execute("select max(lz_lot_spatial_id) from LZ_LOT_SPATIAL")
-					
-					#Set next LZ_LOT_SPATIAL_ID
-					nextLsId = getNextId("LZ_LOT_SPATIAL_ID","LZ_LOT_SPATIAL")
+					count += 1
+					logger.debug("geoInput is {}".format(geoInput))
+					logger.debug("count is {} ({}) - zoneShp is {} - TotalRecords is {} ({})".format(count,type(count),zoneShp,totalRecords,type(totalRecords)))
+					logger.debug("sRef is {}".format(sRef))
+					logger.debug("count % zoneShp = {}".format(count % zoneShp))
+					logger.debug("count == totalRecords is {}".format(count == totalRecords))
+					if count % zoneShp == 0 or count == totalRecords:
+						params = {
+							'f':'json',
+							'outFields':'objectid',
+							'returnGeometry':'false',
+							'inSR':sRef,
+							'returnIdsOnly':'true',
+							'geometry':'{{"rings":[{}]}}'.format(geoInput),
+							'geometryType':'esriGeometryPolygon',
+							'spatialRel': 'esriSpatialRelIntersects'
+						}
+						# TO-DO: ADD RETRY MECHANISM, AND HANDLER FOR EMPTY RESULTS
+						retries_1 = 0
+						success_1 = False
 						
-					for i, lotref in enumerate(lots):
-						query = "{} into LZ_LOT_SPATIAL values ({}, {}, '{}', CURRENT_TIMESTAMP, null)".format(query,nextLsId,lz_update_log_id,lotref)
-						nextLsId += 1
-						
-						if (i + 1) % 1000 == 0 or (i + 1) == len(lots):
-							query = "{} select 1 from dual".format(query)
-
-							try:
-								c.execute(query)
-							except cx_Oracle.Error as error:
-								logger.info("[ERROR] {}".format(error))
-								print(error)
+						while not success_1:
+							jsonResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
+							logger.debug("Getting lots in Zone BBOX: {}".format(jsonResult))
+							#Delay calls to rest service
+							time.sleep(2)
 							
-							query = "insert all "
-					
-					geoInput = ''
-		c.execute("commit")
+							#Iterate through ObjectIDs and extract lot information
+							if jsonResult.get('objectIds'):
+								for oID in jsonResult['objectIds']:
+									
+									if oIDInput == '':
+										oIDInput = '{}'.format(oID)
+									else:
+										oIDInput += ",{}".format(oID)
+									
+									lcount += 1
+									
+									if lcount % lotLimit == 0 or lcount == len(jsonResult['objectIds']):
+										params = {
+											'f':'json',
+											'outFields':'lotidstring',
+											'returnGeometry':'false',
+											'returnDistinctValues':'true',
+											'where':'objectid in ({})'.format(oIDInput)
+										}
+										jsonLotResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
+										
+										if jsonLotResult.get('features'):
+											success_1 = True
+											for lotref in jsonLotResult["features"]:
+												#build up list of lots to insert
+												lots.append(lotref["attributes"]["lotidstring"])
+										else:
+											retries += 1
+											print("ERROR: {}".format(jsonLotResult))
+											logging.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
+										
+										oIDInput = '' #Reset
+							else:
+								retries_1 += 1
+								print("ERROR: {}".format(jsonResult))
+								logging.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
+							
+							#If REST calls were successful, insert into table
+							if success_1:
+								#All Lots extracted, insert into table
+								query = "insert all "
+								c.execute("select max(lz_lot_spatial_id) from LZ_LOT_SPATIAL")
+								
+								#Set next LZ_LOT_SPATIAL_ID
+								nextLsId = getNextId("LZ_LOT_SPATIAL_ID","LZ_LOT_SPATIAL")
+									
+								for i, lotref in enumerate(lots):
+									query = "{} into LZ_LOT_SPATIAL values ({}, {}, '{}', CURRENT_TIMESTAMP, null)".format(query,nextLsId,lz_update_log_id,lotref)
+									nextLsId += 1
+									
+									if (i + 1) % 1000 == 0 or (i + 1) == len(lots):
+										query = "{} select 1 from dual".format(query)
+
+										try:
+											c.execute(query)
+										except cx_Oracle.Error as error:
+											logger.info("[ERROR] {}".format(error))
+											print(error)
+										
+										query = "insert all "
+								
+								geoInput = ''
+							else:
+								#Issue with REST Call, retry
+								while retries_1 > 9:
+									select = input("\nResults from Lot Service are incorrect and failed 10 times, Do you want to try again? y/n\n")
+									if select == "y":
+										retries_1 = 0
+										break
+									elif select == "n":
+										print("Lot Zoning update process Aborted!!")
+										logger.info("[EXIT] Lot Zone Update process aborted by user")
+										sys.exit()
+									else:
+										print("Invalid selection. Please enter y or n")
+									
+			c.execute("commit")
+			
+			#TO-DO ADD HANDLER TO CHECK FOR EMPTY LOT RESULTS FROM PREVIOUS STEP
+			#Create Lot Spatial Layer
+			logger.info("[PROCESS] Processing lots for lz_update_log_id: {}".format(lz_update_log_id))
+			createLotLayer(lz_update_log_id,LotUrl)
+			
+			#Tabulate Intersect Lot layer with current Zone layer
+			intersectLotZone(lz_update_log_id,"Lot_Zone_to_update")
+			
+			#Process Intersected Results
+			updateLotZone()
 		
-		#Create Lot Spatial Layer
-		logger.info("[PROCESS] Processing lots for lz_update_log_id: {}".format(lzId))
-		createLotLayer(lz_update_log_id,LotUrl)
-		
-		#Tabulate Intersect Lot layer with current Zone layer
-		intersectLotZone(lz_update_log_id,"Lot_Zone_to_update")
-		
-		#Process Intersected Results
-		
-		#Finished Zoning chunk, set up for next 30 days
 		logger.info("[PROCESS] {} Lots Intersected for {} Zones".format(lcount,count))
 		print("{} Lots identified for {} Zones".format(lcount,count))
-		#c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lz_update_log_id)) #Update Lot Zone Log to indicate zone is complete
-		#c.execute("commit")
+		
+		#Update Log and Lot records as complete
+		c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lz_update_log_id)) #Update Lot Zone Log to indicate zone is complete
+		c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lz_update_log_id))
+		c.execute("commit")
+		
 		c.close()
 		pool.release(connection)
+		
+		#Finished Zoning chunk, set up for next 30 days
 		last_update = end_period
 		end_period = end_period + timedelta(days=30) #set up next chucnk
 		
