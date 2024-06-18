@@ -17,7 +17,8 @@ There is a business need for the intersection results of these 2 datasets as it 
 ## Built With
 
 * Python
-  * arcpy 
+* Arcpy
+* Oracle
 
 ## Concept
 ![Lot-Planning_Zone-Intersect v4 drawio](https://github.com/Pooomr/LotCadastre-Planning-Intersect-Incremental-Update/assets/140774543/6669a6c1-cf61-4577-ab98-4f1a18bfddea)
