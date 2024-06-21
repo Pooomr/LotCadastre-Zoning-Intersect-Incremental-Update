@@ -321,7 +321,7 @@ def extractLots(lzId, totalRec):
 						
 						lcount += 1
 						
-						logger.debug("lcount = {} - lotLimit = {} - total Objects = {}".format(lcount,lotLimit,len(jsonResult['objectIds'])))
+						#logger.debug("lcount = {} - lotLimit = {} - total Objects = {}".format(lcount,lotLimit,len(jsonResult['objectIds'])))
 						
 						if lcount % lotLimit == 0 or lcount == len(jsonResult['objectIds']):
 							params = {
@@ -332,12 +332,12 @@ def extractLots(lzId, totalRec):
 								'where':'objectid in ({})'.format(oIDInput)
 							}
 							jsonLotResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
-							logger.debug("Extract LOTREFS for OIDs: {}".format(oIDInput))
+							#logger.debug("Extract LOTREFS for OIDs: {}".format(oIDInput))
 							if jsonLotResult.get('features'):
 								success_1 = True
 								for lotref in jsonLotResult["features"]:
 									#build up list of lots to insert
-									logger.debug("Appending to lots(): {}".format(lotref["attributes"]["lotidstring"]))
+									#logger.debug("Appending to lots(): {}".format(lotref["attributes"]["lotidstring"]))
 									lots.append(lotref["attributes"]["lotidstring"])
 							else:
 								retries_1 += 1
@@ -361,13 +361,13 @@ def extractLots(lzId, totalRec):
 					nextLsId = getNextId("LZ_LOT_SPATIAL_ID","LZ_LOT_SPATIAL")
 					
 					#Debug
-					logger.debug("Total lots in Lots() is {}".format(len(lots)))
+					#logger.debug("Total lots in Lots() is {}".format(len(lots)))
 					
 					for i, lotref in enumerate(lots):
 						query = "{} into LZ_LOT_SPATIAL (LZ_LOT_SPATIAL_ID, LZ_UPDATE_LOG_ID, LOT_RUN, LOTREF, CREATE_DATE) values ({}, {}, {}, '{}', CURRENT_TIMESTAMP)".format(query,nextLsId,lzId,runNo,lotref)
 						
 						nextLsId += 1
-						logger.debug("SQL {} : {}".format(i, " into LZ_LOT_SPATIAL (LZ_LOT_SPATIAL_ID, LZ_UPDATE_LOG_ID, LOT_RUN, LOTREF, CREATE_DATE) values ({}, {}, {}, '{}', CURRENT_TIMESTAMP)".format(nextLsId,lzId,runNo,lotref)))
+						#logger.debug("SQL {} : {}".format(i, " into LZ_LOT_SPATIAL (LZ_LOT_SPATIAL_ID, LZ_UPDATE_LOG_ID, LOT_RUN, LOTREF, CREATE_DATE) values ({}, {}, {}, '{}', CURRENT_TIMESTAMP)".format(nextLsId,lzId,runNo,lotref)))
 						
 						if (i + 1) % 1000 == 0 or (i + 1) == len(lots):
 							query = "{} select 1 from dual".format(query)
@@ -375,8 +375,7 @@ def extractLots(lzId, totalRec):
 							
 							#Add to commit queue
 							sql.append(query)
-							logger.debug("INSERTED {}".format(query))
-							print("INSERTED {}".format(query))
+							#logger.debug("INSERTED {}".format(query))
 							sql2.append(query2)
 							
 							# try:
@@ -414,13 +413,10 @@ def extractLots(lzId, totalRec):
 							print("Invalid selection. Please enter y or n")
 		
 		#Commit all Lot queries
-		logger.debug("total queries in sql: {}".format(len(sql)))
 		for q in sql:
-			#logger.debug("INSERT LOT QUERY: ".format(q[0]))
 			c.execute(q)
 		c.execute("commit")
 		for q in sql2:
-			#logger.debug("INSERT LOT RUN QUERY: ".format(q[0]))
 			c.execute(q)
 
 		#Reset all SQL Lists	
@@ -443,12 +439,73 @@ def intersectLotZone(lzId,layerName):
 	
 	logger.info("[PROCESS] Tabulate Intersection complete for lz_update_log_id: {}".format(lzId))
 
-def updateLotZone():
+def updateLotZone(lzId):
 	#Update Lot_Zone table
+	record = 0
+	query = "insert all "
+	lzTuId = getNextId("LZ_TO_UPDATE_ID","LZ_TO_UPDATE")
+	
 	fieldNames = ["OBJECTID","lotidstring","EPI_NAME","EPI_TYPE","SYM_CODE","LAY_CLASS","AREA","PERCENTAGE"]
+	totRecords = int(arcpy.management.GetCount("{}\\Lot_Zone_to_update".format(arcFolder))[0]) #Total Lot Zone to update records
+	
 	with arcpy.da.SearchCursor("{}\\Lot_Zone_to_update".format(arcFolder),fieldNames) as cur:
 		for row in cur:
-			print("{} {} {} {}".format(row[1],row[2],row[3],row[4]))
+			logger.debug("into LZ_TO_UPDATE (LZ_TO_UPDATE_ID, LZ_UPDATE_LOG_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE) values ({},{},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP)".format(lzTuId,lzId,row[1],row[2],row[3],row[4],row[5],row[6],row[7]))
+			query = "{} into LZ_TO_UPDATE (LZ_TO_UPDATE_ID, LZ_UPDATE_LOG_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE) values ({},{},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP)".format(query,lzTuId,lzId,row[1],row[2],row[3],row[4],row[5],row[6],row[7])
+			record += 1
+			lzTuId += 1
+			
+			if record % 1000 == 0 or record == totRecords:
+				#Every 1000 records insert
+				query = "{} select 1 from dual".format(query)
+				
+				try:
+					c.execute(query)
+				except cx_Oracle.Error as error:
+					logger.info("[ERROR] {}".format(error))
+					print(error)
+					
+				query = "insert all "
+	
+	#Once all records are inserted, commit
+	c.execute("commit")
+	
+	#Check which LOT_ZONES to expire
+	df_lz_expire = pd.read_sql("select lz.lot_zone_id from lot_zone lz where exists (select * from lz_to_update ltu where ltu.lotref = lz.lotref) and not exists (select * from lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class) and lz.end_date is null",connection)
+	
+	#Expire LOT_ZONE records
+	for i, row in df_lz_expire.iterrows():
+		c.execute("update LOT_ZONE set end_date = CURRENT_TIMESTAMP, update_date = CURRENT_TIMESTAMP where lot_zone_id = {}".format(row["LOT_ZONE_ID"]))
+	c.execute("commit")
+	
+	#Check which LZ_TO_UPDATE records do not need to update LOT_ZONE records ##SET ROUNDING FOR SUM_AREA AND PERCENTAGE HERE##
+	df_no_update = pd.read_sql("select ltu.lz_to_update_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and round(lz.percentage,0) = round(ltu.percentage,0) and round(lz.sum_area,0) = round(ltu.sum_area,0) and ltu.processed is null and ltu.update_action is null and lz.end_date is null",connection)
+	
+	#Update status for records requiring no update
+	for i, row in df_no_update.iterrows():
+		c.execute("update LZ_TO_UPDATE set update_action = 'NO UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id = {}".format(row["LZ_TO_UPDATE_ID"])) 
+	c.execute("commit")
+	
+	#Check for records where just the sum_area or Percentage need update
+	df_to_update = pd.read_sql("select ltu.lz_to_update_id, ltu.sum_area, ltu.percentage, lz.lot_zone_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and ltu.processed is null and ltu.update_action is null and lz.end_date is null",connection)
+	
+	#Update LOT_ZONE and LZ_TO_UPDATE (SUM AREA and PERCENTAGE)
+	for i, row in df_to_update.iterrows():
+		c.execute("update LOT_ZONE set sum_area = {}, percentage = {}, update_date = CURRENT_TIMESTAMP where lot_zone_id = {}".format(row["SUM_AREA"],row["PERCENTAGE"],row["LOT_ZONE_ID"]))
+		c.execute("update LZ_TO_UPDATE set update_action = 'UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id = {}".format(row["LZ_TO_UPDATE_ID"]))
+	c.execute("commit")
+	
+	#Check for Records from LZ_TO_UPDATE to Insert
+	df_to_insert = pd.read_sql("select ltu.lz_to_update_id, ltu.lotref, ltu.epi_name, ltu.epi_type, ltu.sym_code, ltu.lay_class, ltu.sum_area, ltu.percentage from lz_to_update ltu where not exists (select * from lot_zone lz where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class)",connection)
+	
+	#Insert new records to LOT_ZONE and update LZ_TO_UPDATE
+	lz_id = getNextId("LOT_ZONE_ID","LOT_ZONE")
+	for i, row in df_to_insert.iterrows():
+		c.execute("insert into LOT_ZONE (LOT_ZONE_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE, UPDATE_DATE) values ({},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)".format(lz_id,row["LOTREF"],row["EPI_NAME"],row["EPI_TYPE"],row["SYM_CODE"],row["LAY_CLASS"],row["SUM_AREA"],row["PERCENTAGE"]))
+		c.execute("update LZ_TO_UPDATE set processed = CURRENT_TIMESTAMP, update_action = 'INSERT' where lz_to_update_id = {}".format(row["LZ_TO_UPDATE_ID"]))
+		lz_id += 1
+	c.execute("commit")
+	
 			
 if __name__ == "__main__":
 	
@@ -480,20 +537,6 @@ if __name__ == "__main__":
 	zoneShp = 5 #Total number of zones to extract lots each round
 	lotLimit = 200 #Total number of lots to query each round
 	
-	#Check if there are unprocessed lots
-	# df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
-	# if len(df_lz_to_process) > 0:
-		# for i, to_proc in df_lz_to_process.iterrows():
-			# logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			# createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl)
-			
-			# intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
-			
-			# #Update Log and Lot records as complete
-			# c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"])) #Update Lot Zone Log to indicate zone is complete
-			# c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			# c.execute("commit")
-	
 	#Check if there are unprocessed Zones (to get list of lots from)
 	df_zone_to_process = pd.read_sql("select lz_update_log_id, count(*) total_records from LZ_ZONE_BBOX where processed is null group by lz_update_log_id order by lz_update_log_id",connection)
 	if len(df_zone_to_process) > 0:
@@ -511,7 +554,7 @@ if __name__ == "__main__":
 			
 			intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
 			
-			updateLotZone()
+			updateLotZone(to_proc["LZ_UPDATE_LOG_ID"])
 			
 	#Get last update date of Lot_Zone
 	c.execute("select max(end_date) from LZ_UPDATE_LOG where finish_date is not null")
@@ -589,7 +632,7 @@ if __name__ == "__main__":
 					if zcount % 1000 == 0 or zcount == totalRecords:
 						#Insert records every 1000
 						query = "{} select 1 from dual".format(query)
-						print(query)
+						
 						try:
 							c.execute(query)
 						except cx_Oracle.Error as error:
@@ -625,7 +668,7 @@ if __name__ == "__main__":
 			intersectLotZone(lz_update_log_id,"Lot_Zone_to_update")
 			
 			#Process Intersected Results
-			updateLotZone()
+			updateLotZone(lz_update_log_id)
 		
 		logger.info("[PROCESS] {} Lots Intersected for {} Zones".format(lcount,count))
 		print("{} Lots identified for {} Zones".format(lcount,count))
