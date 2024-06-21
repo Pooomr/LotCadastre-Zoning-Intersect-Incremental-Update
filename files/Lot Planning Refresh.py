@@ -255,25 +255,40 @@ def extractLots(lzId, totalRec):
 	geoInput = '' #Initialise string for coordinates
 	oIDInput = '' #Initialise string for Lot Object Ids
 	lots = list() #Store lots that intersect with zone layers
+	sql = list() #Store queries to commit for insert into lz_lot_spatial
+	sql2 = list() #Store quries to commit for insert into lz_lot_run
 			
-	df_bbox = pd.read_sql("select lz_zone_bbox_id, lz_update_log_id, spatial_ref, bbox from LZ_ZONE_BBOX where lz_update_log_id = {} and processed is null".format(lzId),connection)
+	df_bbox = pd.read_sql("select lz_zone_bbox_id, lz_update_log_id, spatial_ref, bbox from LZ_ZONE_BBOX where lz_update_log_id = {} and processed is null order by lz_zone_bbox_id".format(lzId),connection)
 	print(df_bbox)
 	count = 0
 	lcount = 0
 	
+	#Get Next Run ID
+	runId = getNextId("LZ_LOT_RUN_ID","LZ_LOT_RUN")
+	#Get Next Run number
+	runNo = getNextId("LOT_RUN","LZ_LOT_RUN")
+	
+	#Set up sql query for Inserts to LZ_LOT_RUN
+	query2 = "insert all "
+	
 	for index, row in df_bbox.iterrows():
 		sRef = row["SPATIAL_REF"]
+		bboxId = row["LZ_ZONE_BBOX_ID"]
 		if geoInput == '':
 			geoInput = "{}".format(row["BBOX"])
 		else:
 			geoInput += ",{}".format(row["BBOX"])
 		
+		#Insert Run information to audit lot extractions
+		query2 = "{} into LZ_LOT_RUN (LZ_LOT_RUN_ID, LOT_RUN, LZ_ZONE_BBOX_ID, RUN_DATE) values ({},{},{},CURRENT_TIMESTAMP)".format(query2,runId,runNo,bboxId)
+		runId += 1
+		
 		count += 1
-		logger.debug("geoInput is {}".format(geoInput))
-		logger.debug("count is {} ({}) - zoneShp is {} - TotalRecords is {} ({})".format(count,type(count),zoneShp,totalRec,type(totalRec)))
-		logger.debug("sRef is {}".format(sRef))
-		logger.debug("count % zoneShp = {}".format(count % zoneShp))
-		logger.debug("count == totalRecords is {}".format(count == totalRec))
+		# logger.debug("geoInput is {}".format(geoInput))
+		# logger.debug("count is {} ({}) - zoneShp is {} - TotalRecords is {} ({})".format(count,type(count),zoneShp,totalRec,type(totalRec)))
+		# logger.debug("sRef is {}".format(sRef))
+		# logger.debug("count % zoneShp = {}".format(count % zoneShp))
+		# logger.debug("count == totalRecords is {}".format(count == totalRec))
 		if count % zoneShp == 0 or count == totalRec:
 			params = {
 				'f':'json',
@@ -291,7 +306,7 @@ def extractLots(lzId, totalRec):
 			
 			while not success_1:
 				jsonResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
-				logger.debug("Getting lots in Zone BBOX: {}".format(jsonResult))
+				logger.debug("Getting objIDs in Zone BBOX: {}".format(jsonResult))
 				#Delay calls to rest service
 				time.sleep(2)
 				
@@ -306,6 +321,8 @@ def extractLots(lzId, totalRec):
 						
 						lcount += 1
 						
+						logger.debug("lcount = {} - lotLimit = {} - total Objects = {}".format(lcount,lotLimit,len(jsonResult['objectIds'])))
+						
 						if lcount % lotLimit == 0 or lcount == len(jsonResult['objectIds']):
 							params = {
 								'f':'json',
@@ -315,14 +332,15 @@ def extractLots(lzId, totalRec):
 								'where':'objectid in ({})'.format(oIDInput)
 							}
 							jsonLotResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
-							
+							logger.debug("Extract LOTREFS for OIDs: {}".format(oIDInput))
 							if jsonLotResult.get('features'):
 								success_1 = True
 								for lotref in jsonLotResult["features"]:
 									#build up list of lots to insert
+									logger.debug("Appending to lots(): {}".format(lotref["attributes"]["lotidstring"]))
 									lots.append(lotref["attributes"]["lotidstring"])
 							else:
-								retries += 1
+								retries_1 += 1
 								print("ERROR: {}".format(jsonLotResult))
 								logging.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
 							
@@ -336,27 +354,51 @@ def extractLots(lzId, totalRec):
 				if success_1:
 					#All Lots extracted, insert into table
 					query = "insert all "
+					
 					#c.execute("select max(lz_lot_spatial_id) from LZ_LOT_SPATIAL")
 					
 					#Set next LZ_LOT_SPATIAL_ID
 					nextLsId = getNextId("LZ_LOT_SPATIAL_ID","LZ_LOT_SPATIAL")
-						
+					
+					#Debug
+					logger.debug("Total lots in Lots() is {}".format(len(lots)))
+					
 					for i, lotref in enumerate(lots):
-						query = "{} into LZ_LOT_SPATIAL values ({}, {}, '{}', CURRENT_TIMESTAMP, null)".format(query,nextLsId,lzId,lotref)
+						query = "{} into LZ_LOT_SPATIAL (LZ_LOT_SPATIAL_ID, LZ_UPDATE_LOG_ID, LOT_RUN, LOTREF, CREATE_DATE) values ({}, {}, {}, '{}', CURRENT_TIMESTAMP)".format(query,nextLsId,lzId,runNo,lotref)
+						
 						nextLsId += 1
+						logger.debug("SQL {} : {}".format(i, " into LZ_LOT_SPATIAL (LZ_LOT_SPATIAL_ID, LZ_UPDATE_LOG_ID, LOT_RUN, LOTREF, CREATE_DATE) values ({}, {}, {}, '{}', CURRENT_TIMESTAMP)".format(nextLsId,lzId,runNo,lotref)))
 						
 						if (i + 1) % 1000 == 0 or (i + 1) == len(lots):
 							query = "{} select 1 from dual".format(query)
-
-							try:
-								c.execute(query)
-							except cx_Oracle.Error as error:
-								logger.info("[ERROR] {}".format(error))
-								print(error)
+							query2 = "{} select 1 from dual".format(query2)
+							
+							#Add to commit queue
+							sql.append(query)
+							logger.debug("INSERTED {}".format(query))
+							print("INSERTED {}".format(query))
+							sql2.append(query2)
+							
+							# try:
+								# c.execute(query)
+							# except cx_Oracle.Error as error:
+								# logger.info("[ERROR] {}".format(error))
+								# print(error)
+							
+							# c.execute("commit")
+							#Insert Run information to audit lot extractions
+							#c.execute(query2)
 							
 							query = "insert all "
+							query2 = "insert all "
 					
+					logger.debug('LOT EXTRACT FOR: {{"rings":[{}]}}'.format(geoInput))
+					logger.debug("Total lots is: {}".format(lcount))
+					
+					runNo += 1
 					geoInput = ''
+					lcount = 0
+					lots = list()
 				else:
 					#Issue with REST Call, retry
 					while retries_1 > 9:
@@ -370,8 +412,23 @@ def extractLots(lzId, totalRec):
 							sys.exit()
 						else:
 							print("Invalid selection. Please enter y or n")
-							
-	c.execute("commit")
+		
+		#Commit all Lot queries
+		logger.debug("total queries in sql: {}".format(len(sql)))
+		for q in sql:
+			#logger.debug("INSERT LOT QUERY: ".format(q[0]))
+			c.execute(q)
+		c.execute("commit")
+		for q in sql2:
+			#logger.debug("INSERT LOT RUN QUERY: ".format(q[0]))
+			c.execute(q)
+
+		#Reset all SQL Lists	
+		sql = list()
+		sql2 = list()
+		#Update Zone BBOX record to indicate completion
+		c.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_zone_bbox_id = {}".format(row["LZ_ZONE_BBOX_ID"]))
+		c.execute("commit")
 	
 def intersectLotZone(lzId,layerName):
 	#Tabulate Intersect Lot Layer with current Zone layer
@@ -391,7 +448,7 @@ def updateLotZone():
 	fieldNames = ["OBJECTID","lotidstring","EPI_NAME","EPI_TYPE","SYM_CODE","LAY_CLASS","AREA","PERCENTAGE"]
 	with arcpy.da.SearchCursor("{}\\Lot_Zone_to_update".format(arcFolder),fieldNames) as cur:
 		for row in cur:
-			print("{} {} {} {} {}".format(row[1],row[2],row[3],row[4]))
+			print("{} {} {} {}".format(row[1],row[2],row[3],row[4]))
 			
 if __name__ == "__main__":
 	
@@ -424,18 +481,18 @@ if __name__ == "__main__":
 	lotLimit = 200 #Total number of lots to query each round
 	
 	#Check if there are unprocessed lots
-	df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
-	if len(df_lz_to_process) > 0:
-		for i, to_proc in df_lz_to_process.iterrows():
-			logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl)
+	# df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
+	# if len(df_lz_to_process) > 0:
+		# for i, to_proc in df_lz_to_process.iterrows():
+			# logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			# createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl)
 			
-			intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
+			# intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
 			
-			#Update Log and Lot records as complete
-			c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"])) #Update Lot Zone Log to indicate zone is complete
-			c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			c.execute("commit")
+			# #Update Log and Lot records as complete
+			# c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"])) #Update Lot Zone Log to indicate zone is complete
+			# c.execute("update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			# c.execute("commit")
 	
 	#Check if there are unprocessed Zones (to get list of lots from)
 	df_zone_to_process = pd.read_sql("select lz_update_log_id, count(*) total_records from LZ_ZONE_BBOX where processed is null group by lz_update_log_id order by lz_update_log_id",connection)
@@ -444,14 +501,17 @@ if __name__ == "__main__":
 			logger.info("[PROCESS] Continued processing Zones for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
 			
 			extractLots(to_proc["LZ_UPDATE_LOG_ID"],int(to_proc["TOTAL_RECORDS"]))
-			
+	
+	#Check if there are unprocessed lots
+	df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
+	if len(df_lz_to_process) > 0:
+		for i, to_proc in df_lz_to_process.iterrows():
+			logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
 			createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl)
 			
 			intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],"Lot_Zone_to_update")
 			
-			#Update Zones as complete
-			c.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			c.execute("commit")
+			updateLotZone()
 			
 	#Get last update date of Lot_Zone
 	c.execute("select max(end_date) from LZ_UPDATE_LOG where finish_date is not null")
@@ -479,6 +539,10 @@ if __name__ == "__main__":
 	#Set current date
 	current_date = datetime.today()
 	end_period = last_update + timedelta(days=30) #Get Zoning updates in 30 day chunks
+	
+	#Make sure end period is not beyond the current date
+	if end_period > current_date:
+		end_period = current_date
 	
 	print("Test Selection...")
 	logger.info("[INFO] Selecting records")
