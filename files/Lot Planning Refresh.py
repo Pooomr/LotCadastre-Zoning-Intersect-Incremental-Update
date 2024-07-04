@@ -7,12 +7,20 @@
 import logging
 import sys
 import os
+import config
 
 username = sys.argv[1]
 
-#Set local or shared directory
+#Set local or shared directory and Environments
 #h_dir = os.getcwd() #Directory where script is is
 h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
+env_mode = config.env_mode #Get Environment setting
+
+#SET LIMITS
+zoneShp = 5 #Total number of zones to extract lots each round
+lotLimit = 200 #Total number of lots to query each round
+day_chunk = 30 #Set to process 5 days at a time
+int_limit = 400 #Limit on number of lots before performing intersect query
 
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
@@ -23,7 +31,7 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 logger.debug("Importing Python Packages...")
-logger.info("[START] Lot_Zone Update process started")
+logger.info("[START] Lot_Zone Update process started - [{}]".format(env_mode))
 
 try:
 	import arcpy
@@ -36,7 +44,6 @@ import shutil
 from arcpy import env
 import pandas as pd
 from datetime import datetime, timedelta
-import config
 import cx_Oracle
 import requests
 import json
@@ -222,11 +229,23 @@ def getRESTData(baseURL, params, serviceName):
 	# logger.debug("Response code is {}".format(r_code))
 	return json.loads(response.text)
 
-def createLotLayer(zoneId,baseURL):
+def createLotLayer(zoneId,baseURL,lot_runs):
 	#Creates Lot feature layer via JSON results
-	df_lots = pd.read_sql("select distinct lotref from LZ_LOT_SPATIAL where lz_update_log_id = {}".format(zoneId),connection)
+	
+	#Build Lot run list
+	lr_query = ""
+	
+	for lrow in lot_runs:
+		if lr_query == "":
+			lr_query = "{}".format(lrow)
+		else:
+			lr_query = "{},{}".format(lr_query,lrow)
+	
+	logger.debug("lr query is {}".format(lr_query))
+	
+	df_lots = pd.read_sql("select lot_run, lotref from (select min(lot_run) lot_run, lotref from lz_lot_spatial where lz_update_log_id = {} and processed is null group by lotref) where lot_run in ({}) order by lot_run".format(zoneId,lr_query),connection)
 
-	#logger.debug("Running createLotLayer: df_lots contains {}".format(df_lots))
+	logger.debug("Running createLotLayer: df_lots contains {}".format(df_lots))
 	
 	#Temporary JSON file
 	tempJSON = "{}\\arcGIS\\Temp.json".format(h_dir)
@@ -265,7 +284,7 @@ def createLotLayer(zoneId,baseURL):
 				for jr in range(len(jsonResult['features'])):
 					lotResults.append(jsonResult['features'][jr])
 			else:
-				print("ERROR: {}".format(jsonResult))
+				print("ERROR createLotLayer: {}".format(jsonResult))
 				logger.debug("ERROR in create Lot Layer: {}".format(jsonResult))
 
 			lotstring = ''
@@ -276,6 +295,8 @@ def createLotLayer(zoneId,baseURL):
 		logger.debug("Scratch folder created...")
 
 	writeToJSON(JSONHead, tempJSON, lotResults, 'lots_to_update')
+	
+	return df_lots
 
 def writeToJSON(JSONHead, tempJSON, JSONResults, layerName):
 
@@ -319,8 +340,8 @@ def writeToJSON(JSONHead, tempJSON, JSONResults, layerName):
 			LayerList += "{}\\arcGIS\\scratch.gdb\\{}_{}".format(h_dir,layerName,layer)
 		else:
 			LayerList += ";{}\\arcGIS\\scratch.gdb\\{}_{}".format(h_dir,layerName,layer)
-	logger.debug("Run: Merge({},{})".format(LayerList,"{}\\arcGIS\\lot_zone_update.gdb\\{}".format(h_dir,layerName)))	
-	arcpy.management.Merge(LayerList, "{}\\arcGIS\\lot_zone_update.gdb\\{}".format(h_dir,layerName))
+	logger.debug("Run: Merge({},{})".format(LayerList,"{}\\{}".format(arcFolder,layerName)))	
+	arcpy.management.Merge(LayerList, "{}\\{}".format(arcFolder,layerName))
 
 def extractLots(lzId, totalRec):
 	#Go through Zone BBOXs and extract lots
@@ -387,7 +408,7 @@ def extractLots(lzId, totalRec):
 				#Iterate through ObjectIDs and extract lot information
 				if jsonResult.get('objectIds'):
 					success_1 = True
-					
+					logger.debug("Total len of ObjectIDs: {}".format(len(jsonResult['objectIds'])))
 					for oID in jsonResult['objectIds']:
 						
 						if oIDInput == '':
@@ -521,7 +542,7 @@ def extractLots(lzId, totalRec):
 		c.execute("commit")
 	
 def get_updated_lots(lzId):
-	#TO-DO Resume function will not work if failure occurs here. Need to add tracking to Lot Layer records that require updating.
+	#TO-DO Handle cases where there are no lots to update
 
 	oIDInput = '' #Initialise string for Lot Object Ids
 	lots = list() #Store lots that intersect with zone layers
@@ -534,7 +555,7 @@ def get_updated_lots(lzId):
 	#Get Next Run ID
 	runId = getNextId("LZ_LOT_RUN_ID","LZ_LOT_RUN")
 	#Get Next Run number
-	runNo = getNextId("LOT_RUN","LZ_LOT_RUN")
+	runNo = getNextId("LOT_RUN","LZ_LOT_SPATIAL")
 	
 	#Add records from LOT layer updated within timeframe to list
 	df_lots_to_add = pd.read_sql("select start_date, end_date from LZ_UPDATE_LOG where lz_update_log_id = {}".format(lzId),connection)
@@ -589,15 +610,16 @@ def get_updated_lots(lzId):
 								lots.append(lotref["attributes"]["lotidstring"])
 						else:
 							retries_1 += 1
-							print("ERROR: {}".format(jsonLotResult))
-							logging.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
+							print("ERROR no Features: {}".format(jsonLotResult))
+							logger.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
 						
 						oIDInput = '' #Reset
 			else:
 				retries_1 += 1
-				print("ERROR: {}".format(jsonResult))
-				logging.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
-			
+				print("ERROR no ObjectIds: {}".format(jsonResult))
+				print("Total objectIds {}".format(len(jsonResult['objectIds'])))
+				logger.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
+				
 			#If REST calls were successful, insert into table
 			if success_1:
 				#All Lots extracted, insert into table
@@ -652,7 +674,7 @@ def get_updated_lots(lzId):
 	
 	c.execute("commit")
 			
-def intersectLotZone(lzId,layerName):
+def intersectLotZone(lzId,layerName,df_lots):
 	#Tabulate Intersect Lot Layer with current Zone layer
 	logger.debug("Intersecting Lots with Zones...")
 	
@@ -668,20 +690,33 @@ def intersectLotZone(lzId,layerName):
 	#c = connection.cursor()
 	
 	#Update LZ_LOT_SPATIAL Status to complete
-	execute_with_retries(connection,"update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
+	#execute_with_retries(connection,"update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
+	query = ""
+	for i, row in df_lots.iterrows():
+		#Go through all processed lots and update processed date
+		if query == "":
+			query = "'{}'".format(row["LOTREF"])
+		else:
+			query = "{},'{}'".format(query,row["LOTREF"])
+		
+		if (i + 1) % 1000 == 0 or (i + 1) == len(df_lots):
+			logger.debug("Run SQL: {}".format(query))
+			execute_with_retries(connection,"update LZ_LOT_SPATIAL set processed = CURRENT_TIMESTAMP where lz_update_log_id = {} and lotref in ({})".format(lzId,query))
+			
+			query = ""
 
 	logger.info("[PROCESS] Tabulate Intersection complete for lz_update_log_id: {}".format(lzId))
 
-def insertToUpdate(lzId):
+def insertToUpdate(lzId,layerName):
 	#Insert updated Lot Zone records to LZ_TO_UPDATE
 	record = 0
 	query = "insert all "
 	lzTuId = getNextId("LZ_TO_UPDATE_ID","LZ_TO_UPDATE")
 	
 	fieldNames = ["OBJECTID","lotidstring","EPI_NAME","EPI_TYPE","SYM_CODE","LAY_CLASS","AREA","PERCENTAGE"]
-	totRecords = int(arcpy.management.GetCount("{}\\Lot_Zone_to_update_{}".format(arcFolder,lzId))[0]) #Total Lot Zone to update records
+	totRecords = int(arcpy.management.GetCount("{}\\{}".format(arcFolder,layerName))[0]) #Total Lot Zone to update records
 
-	with arcpy.da.SearchCursor("{}\\Lot_Zone_to_update_{}".format(arcFolder,lzId),fieldNames) as cur:
+	with arcpy.da.SearchCursor("{}\\{}".format(arcFolder,layerName),fieldNames) as cur:
 		for row in cur:
 			#logger.debug("into LZ_TO_UPDATE (LZ_TO_UPDATE_ID, LZ_UPDATE_LOG_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE) values ({},{},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP)".format(lzTuId,lzId,row[1],row[2],row[3],row[4],row[5],row[6],row[7]))
 			query = "{} into LZ_TO_UPDATE (LZ_TO_UPDATE_ID, LZ_UPDATE_LOG_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE) values ({},{},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP)".format(query,lzTuId,lzId,row[1],row[2],row[3],row[4],row[5],row[6],row[7])
@@ -705,7 +740,7 @@ def insertToUpdate(lzId):
 	c.execute("commit")
 	
 	#Clean up Lot_Zone_to_update layer
-	arcpy.Delete_management("{}\\Lot_Zone_to_update_{}".format(arcFolder,lzId))
+	arcpy.Delete_management("{}\\{}".format(arcFolder,layerName))
 	
 def updateLotZone(lzId):
 	#Go through LZ_TO_UPDATE to determine update action for LOT_ZONE table
@@ -776,14 +811,12 @@ if __name__ == "__main__":
 	#ArcPy Settings
 	logger.debug("[DEBUG] Setting up ArcGIS connection to Planning SDE")
 	env.overwriteOutput = True
-	arcFolder = "{}\\arcGIS\\lot_zone_update.gdb".format(h_dir)
+	if env_mode == "PROD":
+		arcFolder = "{}\\arcGIS\\lot_zone_update.gdb".format(h_dir)
+	elif env_mode == "UAT":
+		arcFolder = "{}\\arcGIS\\test.gdb".format(h_dir)
 	LZ_to_update = "{}\\LandZoning_to_update".format(arcFolder)
 	logger.debug("[DEBUG] Connected to Planning SDE")
-	
-	#SET LIMITS
-	zoneShp = 5 #Total number of zones to extract lots each round
-	lotLimit = 200 #Total number of lots to query each round
-	day_chunk = 5 #Set to process 5 days at a time
 	
 	#Check if there are unprocessed Zones (to get list of lots from)
 	df_zone_to_process = pd.read_sql("select lz_update_log_id, count(*) total_records from LZ_ZONE_BBOX where processed is null group by lz_update_log_id order by lz_update_log_id",connection)
@@ -820,13 +853,13 @@ if __name__ == "__main__":
 			if arcpy.Exists("{}\\Lot_Zone_to_update_{}".format(arcFolder,to_proc["LZ_UPDATE_LOG_ID"])):
 				logger.debug("Continued inserting records to LZ_TO_UPDATE for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
 				insertToUpdate(to_proc["LZ_UPDATE_LOG_ID"])
-			
+		
 	#Check if there are unprocessed 'To update' records
 	df_lz_to_update = pd.read_sql("select distinct lz_update_log_id from LZ_TO_UPDATE where processed is null order by lz_update_log_id",connection)
 	if len(df_lz_to_update) > 0:
 		for i, to_proc in df_lz_to_update.iterrows():
 			logger.info("[PROCESS] Continued processing LOT_ZONE updates for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			
+			sys.exit() #Developing chunk processing for Lot JSON Creation
 			updateLotZone(to_proc["LZ_UPDATE_LOG_ID"])
 			
 			#Update Log record as complete
@@ -870,8 +903,9 @@ if __name__ == "__main__":
 		#Set Date Range for Zone selection
 		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'),end_period.strftime('%Y-%m-%d %H:%M:%S'))
 		
-		#Copy updated records to new layer 'LandZoning_to_update'
-		arcpy.Select_analysis(ZoningLayer, "{}\\LandZoning_to_update".format(arcFolder), where_clause=date_range_expression)
+		#Copy updated records to new layer 'LandZoning_to_update' (Only in PROD)
+		if env_mode == "PROD":
+			arcpy.Select_analysis(ZoningLayer, "{}\\LandZoning_to_update".format(arcFolder), where_clause=date_range_expression)
 		
 		totalRecords = int(arcpy.management.GetCount(LZ_to_update)[0]) #Total Zone records to iterate
 		
@@ -933,27 +967,45 @@ if __name__ == "__main__":
 		get_updated_lots(lz_update_log_id)
 		
 		#If there are lots to process
-		c.execute("select count(*) total_lots from LZ_LOT_SPATIAL where lz_update_log_id = {}".format(lz_update_log_id))
-		total_lots = int(c.fetchone()[0])
+		# c.execute("select count(*) total_lots from LZ_LOT_SPATIAL where lz_update_log_id = {}".format(lz_update_log_id))
+		# total_lots = int(c.fetchone()[0])
 		
-		if total_lots > 0:
-			#TO-DO ADD HANDLER TO CHECK FOR EMPTY LOT RESULTS FROM PREVIOUS STEP
-			#Create Lot Spatial Layer
-			logger.info("[PROCESS] Processing lots for lz_update_log_id: {}".format(lz_update_log_id))
-			createLotLayer(lz_update_log_id,LotUrl)
+		#Check total lots required for update
+		df_lots_to_create = pd.read_sql("select lot_run, count(*) total_count from (select min(lot_run) lot_run, lotref from lz_lot_spatial where lz_update_log_id = {} and processed is null group by lotref) group by lot_run order by lot_run".format(lz_update_log_id),connection)
+		
+		lot_runs = list() #Initialise list of Runs
+		total_lr = 0 #Track total lots so far
+
+		#if total_lots > 0:
+		for i, row in df_lots_to_create.iterrows():
+			#TO-DO Break up Create Lot process to handle large updates
 			
-			#Tabulate Intersect Lot layer with current Zone layer
-			intersectLotZone(lz_update_log_id,"Lot_Zone_to_update_{}".format(lz_update_log_id))
+			lot_runs.append(row["LOT_RUN"]) #Add Lot run to current list
+			total_lr += row["TOTAL_COUNT"]
 			
-			# Acquire connection from the pool (long intersects cause timeouts)
-			connection = pool.acquire()
-			c = connection.cursor()
+			#When limit is reached, continue to intersect process
+			if total_lr > int_limit or (i + 1) == len(df_lots_to_create):
 			
-			#Store Intersected Results to LZ_TO_UPDATE
-			insertToUpdate(lz_update_log_id)
-			
-			#Update Lot_Zone table
-			updateLotZone(lz_update_log_id)
+				#Create Lot Spatial Layer
+				logger.info("[PROCESS] Processing lots for lz_update_log_id: {} - Lot runs {} - {}".format(lz_update_log_id,lot_runs[0],lot_runs[-1]))
+				df_lot_results = createLotLayer(lz_update_log_id,LotUrl,lot_runs)
+				
+				#Tabulate Intersect Lot layer with current Zone layer
+				intersectLotZone(lz_update_log_id,"Lot_Zone_to_update_{}_{}_{}".format(lz_update_log_id,lot_runs[0],lot_runs[-1]),df_lot_results)
+				
+				# Acquire connection from the pool (long intersects cause timeouts)
+				connection = pool.acquire()
+				c = connection.cursor()
+				
+				#Store Intersected Results to LZ_TO_UPDATE
+				insertToUpdate(lz_update_log_id,"Lot_Zone_to_update_{}_{}_{}".format(lz_update_log_id,lot_runs[0],lot_runs[-1]))
+				#sys.exit() #Developing chunk processing for Lot JSON Creation
+				#Update Lot_Zone table
+				updateLotZone(lz_update_log_id)
+				
+				#Reset
+				lot_runs = list()
+				total_lr = 0
 		
 		logger.info("[PROCESS] Finished updating Lot Zones for {} -> {}".format(last_update,end_period))
 		print("[PROCESS] Finished updating Lot Zones for {} -> {}".format(last_update,end_period))
