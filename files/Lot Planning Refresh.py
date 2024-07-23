@@ -14,13 +14,14 @@ username = sys.argv[1]
 #Set local or shared directory and Environments
 #h_dir = os.getcwd() #Directory where script is is
 h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
+f_dir = os.path.dirname(os.getcwd())
 env_mode = config.env_mode #Get Environment setting
 
 #SET LIMITS
 zoneShp = 5 #Total number of zones to extract lots each round
 lotLimit = 200 #Total number of lots to query each round
 day_chunk = 30 #Set to process x days at a time
-int_limit = 1000 #Limit on number of lots before performing intersect query
+int_limit = 200 #Limit on number of lots before performing intersect query
 
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
@@ -585,7 +586,7 @@ def get_updated_lots(lzId):
 			'outFields':'objectid',
 			'returnGeometry':'false',
 			'returnIdsOnly':'true',
-			'where':"modifieddate > TIMESTAMP '{}' AND modifieddate < TIMESTAMP '{}'".format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S'))
+			'where':"modifieddate >= TIMESTAMP '{}' AND modifieddate < TIMESTAMP '{}'".format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S'))
 		}
 
 		retries_1 = 0
@@ -696,13 +697,51 @@ def intersectLotZone(lzId,layerName):
 	#Tabulate Intersect Lot Layer with current Zone layer
 	logger.info("Intersecting Lots with Zones...")
 	
-	#c.close()
-	#pool.release(connection)
+	#arcpy.analysis.TabulateIntersection("{}\\lots_to_update".format(arcFolder), "lotidstring", ZoningLayer, "{}\\{}".format(arcFolder,layerName), "EPI_NAME;EPI_TYPE;SYM_CODE;LAY_CLASS", None, "10 Centimeters", "SQUARE_METERS")
 
-	arcpy.analysis.TabulateIntersection("{}\\lots_to_update".format(arcFolder), "lotidstring", ZoningLayer, "{}\\{}".format(arcFolder,layerName), "EPI_NAME;EPI_TYPE;SYM_CODE;LAY_CLASS", None, "10 Centimeters", "SQUARE_METERS")
-	#logger.debug("{}\\lots_to_update".format(arcFolder))
-	#logger.debug(ZoningLayer)
-	#logger.debug("{}\\{}".format(arcFolder,layerName))
+	try:
+		# Construct file paths
+		lots_to_update_path = "{}\\lots_to_update".format(arcFolder)
+		output_path = "{}\\{}".format(arcFolder, layerName)
+
+		# Log paths for debugging purposes
+		# logger.debug("Lots to update path: {}".format(lots_to_update_path))
+		# logger.debug("Zoning layer: {}".format(ZoningLayer))
+		# logger.debug("Output path: {}".format(output_path))
+		
+		#logger.debug('Trying: arcpy.analysis.TabulateIntersection("{}","lotidstring","{}","{}","EPI_NAME;EPI_TYPE;SYM_CODE;LAY_CLASS",None,"10 Centimeters","SQUARE_METERS")'.format(lots_to_update_path,ZoningLayer,output_path))
+		
+		# Perform the tabulate intersection
+		arcpy.analysis.TabulateIntersection(
+			lots_to_update_path, 
+			"lotidstring", 
+			ZoningLayer, 
+			output_path, 
+			"EPI_NAME;EPI_TYPE;SYM_CODE;LAY_CLASS", 
+			None, 
+			"10 Centimeters", 
+			"SQUARE_METERS"
+		)
+
+	except arcpy.ExecuteError:
+		logger.info("[ERROR] ArcPy error: {}".format(arcpy.GetMessages(2)))
+		time.sleep(20)
+		
+		logger.info("[RESET] Tabulate Intersection failed, restarting script...")
+		print("Tabulate Intersection Failed, Restarting...                                 ")
+		os.system('""{}\\Lot Planning Refresh.bat""'.format(f_dir))
+
+		sys.exit()
+
+	except Exception as e:
+		logger.info("[ERROR] Unexpected error: {}".format(str(e)))
+		time.sleep(20)
+		
+		logger.info("[RESET] Tabulate Intersection failed, restarting script...")
+		print("Tabulate Intersection Failed, Restarting...                                 ")
+		os.system('""{}\\Lot Planning Refresh.bat""'.format(f_dir))
+
+		sys.exit()
 	
 	connection = pool.acquire() #Acquire connection from pool
 	#c = connection.cursor()
@@ -1120,7 +1159,7 @@ if __name__ == "__main__":
 			
 			#Go through each record in LandZoning_to_update and find intersected lots
 			logger.debug("Going through Zone layers...")
-			extractLots(lz_update_log_id, totalRecords, "- Extracting Lots for each zone...")
+			extractLots(lz_update_log_id, totalRecords, "- Extracting Lots for each zone...      ")
 		
 		loadingBar(3,"30% - Extracting Lots updated within time period...")
 		#Get updated lots within time frame
@@ -1140,7 +1179,7 @@ if __name__ == "__main__":
 			total_lr += row["TOTAL_COUNT"]
 			
 			#Progress tracking
-			pc = (i + 1)/len(df_lots_to_create)*60
+			pc = (i + 1)/len(df_lots_to_create)*50
 			pc_rd = math.floor(pc/10) + 4
 			loading_msg = "{}% - Extracting spatial data and performing intersects...[{}/{}]                              ".format(int(40 + pc),(i + 1),len(df_lots_to_create))
 			

@@ -1,9 +1,26 @@
-#config file for Lot Zoning Incremental Update
+#config file for GPR Electorate Update
 
-# Settings for GPR Oracle Database connection PROD
-username = ''
-password = ''
-dsnDCS = '' #DCS - To enable running script in 2 SOE environments
-dsnDPE = '' #DPE
-port = 1521
-encoding = 'UTF-8'
+env_mode = "UAT" #PROD or UAT or DEV
+
+if env_mode == "PROD":
+	# Settings for GPR Oracle Database connection PROD
+	username = ''
+	password = ''
+	dsnDCS = '' #DCS
+	dsnDPE = '' #DPE
+	port = 1521
+	encoding = 'UTF-8'
+elif env_mode == "UAT":
+	#Settings for GPR Oracle Database connection UAT
+	username = ''
+	password = ''
+	dsnDPE = ''
+	port = 1521
+	encoding = 'UTF-8'
+elif env_mode == "DEV":
+	# Settings for GPR Oracle Database connection DEV
+	username = ''
+	password = ''
+	dsnDPE = ''
+	port = 1521
+	encoding = 'UTF-8'
