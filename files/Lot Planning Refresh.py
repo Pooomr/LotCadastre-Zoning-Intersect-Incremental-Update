@@ -18,10 +18,11 @@ f_dir = os.path.dirname(os.getcwd())
 env_mode = config.env_mode #Get Environment setting
 
 #SET LIMITS
-zoneShp = 5 #Total number of zones to extract lots each round
+zoneShp = 1 #Total number of zones to extract lots each round (Need to be set to 1, overlapped bbox's will exclude lots)
+day_backtrack = 1 #How many days back should 'get_updated_lots' function go, this is due to the SIX Maps REST Service for lot cadastre being updated daily, lots can be missing if lot_zone process is run before lots in date range is updated to service
 lotLimit = 200 #Total number of lots to query each round
 day_chunk = 30 #Set to process x days at a time
-int_limit = 200 #Limit on number of lots before performing intersect query
+int_limit = 1000 #Limit on number of lots before performing intersect query
 
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
@@ -581,12 +582,19 @@ def get_updated_lots(lzId):
 	
 	for i, row in df_lots_to_add.iterrows():
 		#print("UP TO FINAL LOT EXTRACT ROUND: {} -> {}".format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S')))
+		
+		#Update start date based on 'day_backtrack' value
+		og_start_date = row["START_DATE"]
+		og_end_date = row["END_DATE"]
+		start_date = og_start_date - timedelta(days=day_backtrack)
+		end_date = og_end_date - timedelta(days=day_backtrack)
+		
 		params = {
 			'f':'json',
 			'outFields':'objectid',
 			'returnGeometry':'false',
 			'returnIdsOnly':'true',
-			'where':"modifieddate >= TIMESTAMP '{}' AND modifieddate < TIMESTAMP '{}'".format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S'))
+			'where':"modifieddate >= TIMESTAMP '{}' AND modifieddate < TIMESTAMP '{}'".format(start_date.strftime('%Y-%m-%d %H:%M:%S'),end_date.strftime('%Y-%m-%d %H:%M:%S'))
 		}
 
 		retries_1 = 0
@@ -634,10 +642,14 @@ def get_updated_lots(lzId):
 						
 						oIDInput = '' #Reset
 			else:
-				retries_1 += 1
-				print("ERROR no ObjectIds: {}".format(jsonResult))
-				print("Total objectIds {}".format(len(jsonResult['objectIds'])))
-				logger.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
+				if jsonResult.get('objectIdFieldName'):
+					#Result is valid, but there are no objectIds
+					logger.info("[PROCESS] No new lots within {} - {}".format(start_date.strftime('%Y-%m-%d %H:%M:%S'),end_date.strftime('%Y-%m-%d %H:%M:%S')))
+					return 
+				else:
+					retries_1 += 1
+					print("ERROR no ObjectIds: {}".format(jsonResult))
+					logger.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
 				
 			#If REST calls were successful, insert into table
 			if success_1:
@@ -664,7 +676,7 @@ def get_updated_lots(lzId):
 
 						query = "insert all "
 
-				logger.debug('LOT EXTRACT FOR DATE RANGE : {} {}'.format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S')))
+				logger.debug('LOT EXTRACT FOR DATE RANGE : {} {}'.format(start_date.strftime('%Y-%m-%d %H:%M:%S'),end_date.strftime('%Y-%m-%d %H:%M:%S')))
 				logger.debug("Total lots is: {}".format(lcount))
 
 				runNo += 1
@@ -728,7 +740,7 @@ def intersectLotZone(lzId,layerName):
 		time.sleep(20)
 		
 		logger.info("[RESET] Tabulate Intersection failed, restarting script...")
-		print("Tabulate Intersection Failed, Restarting...                                 ")
+		print("Tabulate Intersection Failed, Restarting...                                                                 ")
 		os.system('""{}\\Lot Planning Refresh.bat""'.format(f_dir))
 
 		sys.exit()
@@ -1148,7 +1160,7 @@ if __name__ == "__main__":
 			
 		#print("Last inserted ID:", lz_update_log_id)
 		
-		loadingBar(2,"20% - Extracting Lots for each zone...      ")
+		loadingBar(2,"20% - Extracting Lots for each zone...            ")
 		#TO-DO CHANGE TO ITERATE THROUGH BBOX RECORDS TO EXTRACT LOTS
 		if totalRecords > 0:
 			#GET LOTS FOR EACH ZONE SHAPE
@@ -1216,7 +1228,7 @@ if __name__ == "__main__":
 				lot_runs = list()
 				total_lr = 0
 		
-		print("[■■■■■■■■■■] 100% [{} -> {}]                      ".format(last_update.strftime('%Y-%m-%d'),end_period.strftime('%Y-%m-%d')))
+		print("[■■■■■■■■■■] 100% [{} -> {}]                                                           ".format(last_update.strftime('%Y-%m-%d'),end_period.strftime('%Y-%m-%d')))
 		logger.info("[PROCESS] Finished updating Lot Zones for {} -> {}".format(last_update,end_period))
 		print("[PROCESS] Finished updating Lot Zones for {} -> {}".format(last_update,end_period))
 		
