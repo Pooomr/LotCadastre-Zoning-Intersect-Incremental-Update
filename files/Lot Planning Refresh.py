@@ -21,7 +21,7 @@ env_mode = config.env_mode #Get Environment setting
 zoneShp = 1 #Total number of zones to extract lots each round (Need to be set to 1, overlapped bbox's will exclude lots)
 day_backtrack = 1 #How many days back should 'get_updated_lots' function go, this is due to the SIX Maps REST Service for lot cadastre being updated daily, lots can be missing if lot_zone process is run before lots in date range is updated to service
 lotLimit = 200 #Total number of lots to query each round
-day_chunk = 30 #Set to process x days at a time
+day_chunk = 10 #Set to process x days at a time
 int_limit = 1000 #Limit on number of lots before performing intersect query
 
 #Logging settings
@@ -386,7 +386,7 @@ def extractLots(lzId, totalRec, loading_msg):
 		runId += 1
 
 		count += 1
-		#logger.debug("geoInput is {}".format(geoInput))
+		logger.debug("geoInput is {}".format(geoInput))
 		#logger.debug("count is {} ({}) - zoneShp is {} - TotalRecords is {} ({})".format(count,type(count),zoneShp,totalRec,type(totalRec)))
 		# logger.debug("sRef is {}".format(sRef))
 		#logger.debug("count % zoneShp = {}".format(count % zoneShp))
@@ -406,6 +406,8 @@ def extractLots(lzId, totalRec, loading_msg):
 
 			retries_1 = 0
 			success_1 = False
+			retries_2 = 0
+			success_2 = False
 			
 			while not success_1:
 				jsonResult = getRESTData(LotUrl, params, "Lot Cadastre Service")
@@ -453,7 +455,7 @@ def extractLots(lzId, totalRec, loading_msg):
 								else:
 									retries_2 += 1
 									print("ERROR: {}".format(jsonLotResult))
-									logging.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
+									logger.info("[ERROR] Results do not contain features, retrying.. {}".format(jsonLotResult))
 									
 									#Issue with REST Call, retry
 									while retries_1 > 9 or retries_2 > 9:
@@ -471,9 +473,14 @@ def extractLots(lzId, totalRec, loading_msg):
 								
 								oIDInput = '' #Reset
 				else:
-					retries_1 += 1
-					print("ERROR: {}".format(jsonResult))
-					logging.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
+					if jsonResult.get('objectIdFieldName'):
+						#Result is valid, but there are no objectIds
+						logger.info("[PROCESS] No lots intersect with Zone_bbox_id: {}".format(bboxId))
+						success_1 = True
+					else:
+						retries_1 += 1
+						print("ERROR: {}".format(jsonResult))
+						logger.info("[ERROR] Results do not contain objectIds, retrying.. {}".format(jsonResult))
 				
 				#If REST calls were successful, insert into table
 				if success_1 and success_2:
@@ -987,7 +994,7 @@ if __name__ == "__main__":
 	#Check if Lot run for timeframe has been done
 	df_update_lots = pd.read_sql("select lz_update_log_id from LZ_UPDATE_LOG where lot_run_complete is null order by lz_update_log_id",connection)
 	if len(df_update_lots) > 0:
-		loadingBar(3,"30% [Resuming previous update] - Extracting lots updated within time period...")
+		loadingBar(3,"30% [Resuming previous update] - Extracting lots updated within time period...       ")
 		for i, to_proc in df_update_lots.iterrows():
 			logger.info("[PROCESS] Continued processing recently updated lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
 			get_updated_lots(to_proc["LZ_UPDATE_LOG_ID"])
@@ -1092,13 +1099,13 @@ if __name__ == "__main__":
 	
 	#Set current date
 	current_date = datetime.today()
-	end_period = last_update + timedelta(days=30) #Get Zoning updates in 30 day chunks
+	end_period = last_update + timedelta(days=day_chunk) #Get Zoning updates in 30 day chunks
 	
 	#Make sure end period is not beyond the current date
 	if end_period > current_date:
 		end_period = current_date
 	
-	print("Starting Lot-Zone updates for {} -> {}".format(last_update.strftime('%d-%m-%Y'),end_period.strftime('%d-%m-%Y')))
+	print("Starting Lot-Zone updates for {} -> {}                      ".format(last_update.strftime('%d-%m-%Y'),end_period.strftime('%d-%m-%Y')))
 	
 	loadingBar(0,"1% - Time frame set...")
 	#print("{}".format(last_update.strftime('%Y-%m-%d %H:%M:%S')))
@@ -1238,6 +1245,11 @@ if __name__ == "__main__":
 		
 		c.close()
 		pool.release(connection)
+		
+		#Delete layer to release lock
+		if arcpy.Exists(LZ_to_update):
+			logger.info("[PROCESS] Deleting {}".format(LZ_to_update))
+			arcpy.Delete_management(LZ_to_update)
 		
 		#Finished Zoning chunk, set up for next x days
 		last_update = end_period
