@@ -23,6 +23,7 @@ day_backtrack = 1 #How many days back should 'get_updated_lots' function go, thi
 lotLimit = 200 #Total number of lots to query each round
 day_chunk = 10 #Set to process x days at a time
 int_limit = 1000 #Limit on number of lots before performing intersect query
+json_limit = 1000 #Limit on number of lots to add to JSON
 
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
@@ -211,10 +212,11 @@ def getRESTData(baseURL, params, serviceName):
 			r_code2 = 0
 			success = False
 			retries += 1
+			time.sleep(2)
 		
 		# logger.debug("r_code = {} and r_code2 = {}".format(r_code,r_code2))
 		while r_code != 200 or r_code2 != 200 and retries > 9:
-			print("Response code: {} - JSON Response code: {}".format(r_code,r_code2))
+			print("Response code: {} - JSON Response code: {}                           ".format(r_code,r_code2))
 			select2 = input("\nInvalid response received, run query again? y/n\n")
 			if select2 == "y":
 				retries = 0
@@ -319,13 +321,13 @@ def writeToJSON(JSONHead, tempJSON, JSONResults, layerName):
 	for i, row in enumerate(JSONResults):
 
 		#Add lot records to JSON
-		if (i + 1) % 3000 == 1:
+		if (i + 1) % json_limit == 1:
 			JSONinput += '{}'.format(JSONResults[i]) #If first record do not add comma
 		else:
 			JSONinput += ',{}'.format(JSONResults[i])
 		
 		#If max range met, close file and open new one
-		if (i + 1) % 3000 == 0 or (i + 1) == totalSLots:
+		if (i + 1) % json_limit == 0 or (i + 1) == totalSLots:
 			JSONinput += ']}'
 			logger.debug("Writing to JSON file at {}".format(tempJSON))
 			#Clear Temp JSON file and insert results
@@ -826,7 +828,7 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	query3 = ""
 	
 	#Check which LOT_ZONES to expire
-	df_lz_expire = pd.read_sql("select lz.lot_zone_id from lot_zone lz where exists (select * from lz_to_update ltu where ltu.lotref = lz.lotref and ltu.lz_update_log_id = {} and ltu.processed is null) and not exists (select * from lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and ltu.lz_update_log_id = {} and ltu.processed is null) and lz.end_date is null".format(lzId,lzId),connection)
+	df_lz_expire = pd.read_sql("select lz.lot_zone_id from lot_zone lz where exists (select * from lz_to_update ltu where ltu.lotref = lz.lotref and ltu.lz_update_log_id = {} and ltu.processed is null) and not exists (select * from lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and lz.epi_name = ltu.epi_name and lz.epi_type = ltu.epi_type and ltu.lz_update_log_id = {} and ltu.processed is null) and lz.end_date is null".format(lzId,lzId),connection)
 	
 	#Expire LOT_ZONE records
 	for i, row in df_lz_expire.iterrows():
@@ -843,7 +845,7 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	logger.info("Finished Expiry step")
 	
 	#Check which LZ_TO_UPDATE records do not need to update LOT_ZONE records ##SET ROUNDING FOR SUM_AREA AND PERCENTAGE HERE##
-	df_no_update = pd.read_sql("select ltu.lz_to_update_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and round(lz.percentage,0) = round(ltu.percentage,0) and round(lz.sum_area,0) = round(ltu.sum_area,0) and ltu.processed is null and ltu.update_action is null and lz.end_date is null and ltu.lz_update_log_id = {}".format(lzId),connection)
+	df_no_update = pd.read_sql("select ltu.lz_to_update_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and lz.epi_name = ltu.epi_name and lz.epi_type = ltu.epi_type and round(lz.percentage,0) = round(ltu.percentage,0) and round(lz.sum_area,0) = round(ltu.sum_area,0) and ltu.processed is null and ltu.update_action is null and lz.end_date is null and ltu.lz_update_log_id = {}".format(lzId),connection)
 	
 	#Update status for records requiring no update
 	for i, row in df_no_update.iterrows():
@@ -862,7 +864,7 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	logger.info("Finished No Update check")
 	
 	#Check for records where just the sum_area or Percentage need update
-	df_to_update = pd.read_sql("select ltu.lz_to_update_id, ltu.sum_area, ltu.percentage, lz.lot_zone_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and ltu.processed is null and ltu.update_action is null and lz.end_date is null and ltu.lz_update_log_id = {}".format(lzId),connection)
+	df_to_update = pd.read_sql("select ltu.lz_to_update_id, ltu.sum_area, ltu.percentage, lz.lot_zone_id from lot_zone lz, lz_to_update ltu where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and lz.epi_name = ltu.epi_name and lz.epi_type = ltu.epi_type and ltu.processed is null and ltu.update_action is null and lz.end_date is null and ltu.lz_update_log_id = {}".format(lzId),connection)
 	
 	sa_query = ""
 	pc_query = ""
@@ -902,7 +904,7 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	logger.info("Finished Update step")
 	
 	#Check for Records from LZ_TO_UPDATE to Insert
-	df_to_insert = pd.read_sql("select ltu.lz_to_update_id, ltu.lotref, ltu.epi_name, ltu.epi_type, ltu.sym_code, ltu.lay_class, ltu.sum_area, ltu.percentage from lz_to_update ltu where not exists (select * from lot_zone lz where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and lz.end_date is null) and ltu.lz_update_log_id = {}".format(lzId),connection)
+	df_to_insert = pd.read_sql("select ltu.lz_to_update_id, ltu.lotref, ltu.epi_name, ltu.epi_type, ltu.sym_code, ltu.lay_class, ltu.sum_area, ltu.percentage from lz_to_update ltu where not exists (select * from lot_zone lz where lz.lotref = ltu.lotref and lz.sym_code = ltu.sym_code and lz.lay_class = ltu.lay_class and lz.epi_name = ltu.epi_name and lz.epi_type = ltu.epi_type and lz.end_date is null) and ltu.lz_update_log_id = {}".format(lzId),connection)
 	
 	query = "insert all "
 	
@@ -1027,14 +1029,16 @@ if __name__ == "__main__":
 				if total_lr > int_limit or (i + 1) == len(df_lots_to_create):
 					
 					if (i + 1) == len(df_lots_to_create):
-						loadingBar(pc_rd,"{}% [Resuming previous update] - Processing final intersect...                                ".format(int(40 + pc)))
+						loadingBar(pc_rd,"{}% [Resuming previous update] - Processing final intersect...                                  ".format(int(40 + pc)))
 					
 					total_lztu = 0 #Track how many lz_to_update records need to be inserted
 					df_lots = get_lot_runs(to_proc["LZ_UPDATE_LOG_ID"],lot_runs)
 					LZ_to_insert = "Lot_Zone_to_update_{}_{}_{}".format(to_proc["LZ_UPDATE_LOG_ID"],lot_runs[0],lot_runs[-1])
 					
+					logger.debug("[DEBUG] Checking if {} Exists...".format(LZ_to_insert))
+					
 					#Check to see if there are lz_to_update records to be inserted
-					if arcpy.Exists(LZ_to_insert):
+					if arcpy.Exists("{}\\{}".format(arcFolder,LZ_to_insert)):
 						#Check total number of records
 						total_lztu = int(arcpy.management.GetCount("{}\\{}".format(arcFolder,LZ_to_insert))[0])
 						logger.info("{}\\Lot_Zone_to_update_{}_{}_{} Exists with {} records".format(arcFolder,to_proc["LZ_UPDATE_LOG_ID"],lot_runs[0],lot_runs[-1],total_lztu))
@@ -1099,20 +1103,20 @@ if __name__ == "__main__":
 	
 	#Set current date
 	current_date = datetime.today()
-	end_period = last_update + timedelta(days=day_chunk) #Get Zoning updates in 30 day chunks
+	end_period = last_update + timedelta(days=day_chunk) #Get Zoning updates in X day chunks
 	
 	#Make sure end period is not beyond the current date
 	if end_period > current_date:
 		end_period = current_date
 	
-	print("Starting Lot-Zone updates for {} -> {}                      ".format(last_update.strftime('%d-%m-%Y'),end_period.strftime('%d-%m-%Y')))
-	
-	loadingBar(0,"1% - Time frame set...")
+	#loadingBar(0,"1% - Time frame set...")
 	#print("{}".format(last_update.strftime('%Y-%m-%d %H:%M:%S')))
 	
 	#Iterate through all Updated Zone layers until done
 	while last_update < current_date:
-	
+		
+		print("Starting Lot-Zone updates for {} -> {}                      ".format(last_update.strftime('%d-%m-%Y'),end_period.strftime('%d-%m-%Y')))
+		
 		#Set Date Range for Zone selection
 		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'),end_period.strftime('%Y-%m-%d %H:%M:%S'))
 		
