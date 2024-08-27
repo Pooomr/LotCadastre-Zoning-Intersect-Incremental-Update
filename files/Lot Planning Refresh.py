@@ -12,8 +12,8 @@ import config
 username = sys.argv[1]
 
 #Set local or shared directory and Environments
-#h_dir = os.getcwd() #Directory where script is is
-h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
+h_dir = os.getcwd() #Directory where script is is
+#h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
 f_dir = os.path.dirname(os.getcwd())
 env_mode = config.env_mode #Get Environment setting
 
@@ -1118,7 +1118,12 @@ if __name__ == "__main__":
 		print("Starting Lot-Zone updates for {} -> {}                      ".format(last_update.strftime('%d-%m-%Y'),end_period.strftime('%d-%m-%Y')))
 		
 		#Set Date Range for Zone selection
-		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(last_update.strftime('%Y-%m-%d %H:%M:%S'),end_period.strftime('%Y-%m-%d %H:%M:%S'))
+		z_last_update = last_update - timedelta(days=8) #Offset by 8 days to account for weekly upload period
+		z_end_period = end_period - timedelta(days=8)
+		
+		logger.debug("[PROCESS] Offset dates are {} -> {}".format(z_last_update.strftime('%Y-%m-%d %H:%M:%S'),z_end_period.strftime('%Y-%m-%d %H:%M:%S')))
+		
+		date_range_expression = "LAST_EDITED_DATE >= '{}' AND LAST_EDITED_DATE < '{}'".format(z_last_update.strftime('%Y-%m-%d %H:%M:%S'),z_end_period.strftime('%Y-%m-%d %H:%M:%S'))
 		
 		loadingBar(0,"5% - Copying selected Zoning shapes...")
 		
