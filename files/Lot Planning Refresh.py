@@ -153,10 +153,11 @@ def execute_with_retries(connection, query, max_retries=MAX_RETRIES, retry_delay
     attempt = 0
     while attempt < max_retries:
         try:
-            cursor = connection.cursor()
-            cursor.execute(query)
-            connection.commit()
-            cursor.close()
+            #cursor = connection.cursor()
+            #cursor.execute(query)
+            #connection.commit()
+            #cursor.close()
+            connection.execute(query)
             #logger.debug("Query executed successfully")
             return
         except cx_Oracle.OperationalError as e:
