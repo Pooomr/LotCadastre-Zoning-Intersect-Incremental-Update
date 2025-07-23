@@ -2,6 +2,7 @@
 	v1 - First version - Select records based on last_update_date filter working
 	v1a - Unable to make tabulation work with lot layer (no OID)
 	v2 - New version, processes Zones in 30 (or custom via day_chunk variable) day chunks
+	v3 - Updated for new Python Environment - Converted SQL calls to use SQLAlchemy
 '''
 
 import logging
@@ -12,8 +13,9 @@ import config
 username = sys.argv[1]
 
 #Set local or shared directory and Environments
-h_dir = os.getcwd() #Directory where script is is
-#h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
+#h_dir = os.getcwd() #Directory where script is is
+h_dir = "C:\\TMP\\Python\\Lot_Zone" #Set directory as Local drive
+log_dir = os.getcwd() #Directory for Log
 f_dir = os.path.dirname(os.getcwd())
 env_mode = config.env_mode #Get Environment setting
 
@@ -28,7 +30,7 @@ json_limit = 1000 #Limit on number of lots to add to JSON
 #Logging settings
 logger = logging.getLogger("LotPlanningLog")
 logger.setLevel(logging.DEBUG)
-file_handler = logging.FileHandler('{}\\log.txt'.format(h_dir))
+file_handler = logging.FileHandler('{}\\log.txt'.format(log_dir))
 formatter = logging.Formatter("%(asctime)s - {} - %(message)s".format(username),'%d/%m/%Y %H:%M:%S')
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -37,11 +39,19 @@ logger.debug("Importing Python Packages...")
 logger.info("[START] Lot_Zone Update process started - [{}]".format(env_mode))
 
 try:
-	import arcpy
-except:
-	print("Error Importing arcpy module, make sure OpenVPN is connected and licences are available!")
-	logger.info("[STOPPED] Unable to import arcpy module, Lot Planning update Stopped")
-	sys.exit()
+    import arcpy
+except Exception as e:
+    error_message = (
+        f"Error importing arcpy module: {e}\n"
+        "Possible reasons:\n"
+        "1. OpenVPN is not connected.\n"
+        "2. Licenses for arcpy are not available.\n"
+        "3. The arcpy module is not installed or accessible.\n"
+        "Please check the above points and try again."
+    )
+    print(error_message)
+    logger.info(f"[STOPPED] {error_message}")
+    sys.exit()
 
 import shutil
 from arcpy import env
@@ -50,6 +60,7 @@ from datetime import datetime, timedelta
 import cx_Oracle
 import requests
 import json
+from sqlalchemy import create_engine
 
 logger.debug("Python packages imported successfully")
 
@@ -73,8 +84,8 @@ def loadingBar(p: int, msg: str) -> str:
 	#sys.stdout.flush()
 
 def getNextId(column: str, table: str) -> int:
-	c.execute("select max({}) from {}".format(column, table))
-	result = c.fetchone()
+	get_result = connection.execute("select max({}) from {}".format(column, table))
+	result = get_result.fetchone()
 
 	#If records exist, increment next id, else start at 1
 	if result[0] != None:
@@ -123,24 +134,20 @@ def createSession(username,password):
 			print("Trying DCS IP: {}".format(config.dsnDCS))
 
 		try:
-			pool = cx_Oracle.SessionPool(
-				username,
-				password,
-				dsn,
-				min=1,
-				max=3,
-				increment=1,
-				encoding=config.encoding)
+			dsn_tns = cx_Oracle.makedsn(dsn, config.port, service_name=config.serviceName)
+			connection_string = f"oracle+cx_oracle://{config.username}:{config.password}@{dsn_tns}"
+			engine = create_engine(connection_string)
+			connection = engine.connect()
 
-			# show the version of the Oracle Database
-			print("Connection Successful!")
+			# Log the connection success
+			logger.debug("Connection to Oracle DB successful!")
 			oc_attempts = 2
 		except cx_Oracle.Error as error:
 			logger.info("[ERROR] {}".format(error))
 			print(error)
 			oc_attempts += 1
 
-	return pool
+	return connection
 
 def execute_with_retries(connection, query, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY):
     attempt = 0
@@ -162,7 +169,7 @@ def execute_with_retries(connection, query, max_retries=MAX_RETRIES, retry_delay
                 logger.info("Retrying in %s seconds...", retry_delay)
                 time.sleep(retry_delay)
                 # Reconnect to the database
-                connection = pool.acquire()
+                connection = createSession(config.username, config.password)
 	
 def getRESTData(baseURL, params, serviceName):
 
@@ -216,7 +223,7 @@ def getRESTData(baseURL, params, serviceName):
 		
 		# logger.debug("r_code = {} and r_code2 = {}".format(r_code,r_code2))
 		while r_code != 200 or r_code2 != 200 and retries > 9:
-			print("Response code: {} - JSON Response code: {}                           ".format(r_code,r_code2))
+			print("Response code: {} - JSON Response code: {}                                           ".format(r_code,r_code2))
 			select2 = input("\nInvalid response received, run query again? y/n\n")
 			if select2 == "y":
 				retries = 0
@@ -271,9 +278,9 @@ def createLotLayer(zoneId,baseURL,lot_runs,df_lots):
 
 	for i, row in df_lots.iterrows():
 		if lotstring == '':
-			lotstring += "'{}'".format(row["LOTREF"])
+			lotstring += "'{}'".format(row["lotref"])
 		else:
-			lotstring += ",'{}'".format(row["LOTREF"])
+			lotstring += ",'{}'".format(row["lotref"])
 
 		#Every 200 records query service
 		if (i + 1) % 200 == 0 or (i + 1) == len(df_lots):
@@ -376,12 +383,12 @@ def extractLots(lzId, totalRec, loading_msg):
 	query2 = "insert all "
 	
 	for index, row in df_bbox.iterrows():
-		sRef = row["SPATIAL_REF"]
-		bboxId = row["LZ_ZONE_BBOX_ID"]
+		sRef = row["spatial_ref"]
+		bboxId = row["lz_zone_bbox_id"]
 		if geoInput == '':
-			geoInput = "{}".format(row["BBOX"])
+			geoInput = "{}".format(row["bbox"])
 		else:
-			geoInput += ",{}".format(row["BBOX"])
+			geoInput += ",{}".format(row["bbox"])
 
 		#Insert Run information to audit lot extractions
 		query2 = "{} into LZ_LOT_RUN (LZ_LOT_RUN_ID, LOT_RUN, LZ_ZONE_BBOX_ID, RUN_DATE) values ({},{},{},CURRENT_TIMESTAMP)".format(query2,runId,runNo,bboxId)
@@ -540,14 +547,14 @@ def extractLots(lzId, totalRec, loading_msg):
 		if len(sql) > 0:
 			for q in sql:
 				try:
-					c.execute(q)
+					connection.execute(q)
 				except cx_Oracle.Error as error:
 					logger.info("SQL error: {}".format(error))
 					logger.info(q)
-			c.execute("commit")
+			connection.execute("commit")
 			for q in sql2:
 				try:
-					c.execute(q)
+					connection.execute(q)
 				except cx_Oracle.Error as error:
 					logger.info("SQL2 error: {}".format(error))
 					logger.info(q)
@@ -556,12 +563,12 @@ def extractLots(lzId, totalRec, loading_msg):
 			sql = list()
 			sql2 = list()
 			#Update Zone BBOX record to indicate completion
-			c.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_zone_bbox_id = {}".format(bboxId))
-			c.execute("commit")
+			connection.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_zone_bbox_id = {}".format(bboxId))
+			connection.execute("commit")
 			logger.debug("Committed lz_zone_bbox_id {}".format(bboxId))
 		else:
 			#Update Zone BBOX record to indicate completion, but do not commit in case process fails
-			c.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_zone_bbox_id = {}".format(bboxId))
+			connection.execute("update LZ_ZONE_BBOX set processed = CURRENT_TIMESTAMP where lz_zone_bbox_id = {}".format(bboxId))
 
 		#Progress tracking
 		pc = (count + 1)/len(df_bbox)*10
@@ -593,8 +600,8 @@ def get_updated_lots(lzId):
 		#print("UP TO FINAL LOT EXTRACT ROUND: {} -> {}".format(row["START_DATE"].strftime('%Y-%m-%d %H:%M:%S'),row["END_DATE"].strftime('%Y-%m-%d %H:%M:%S')))
 		
 		#Update start date based on 'day_backtrack' value
-		og_start_date = row["START_DATE"]
-		og_end_date = row["END_DATE"]
+		og_start_date = row["start_date"]
+		og_end_date = row["end_date"]
 		start_date = og_start_date - timedelta(days=day_backtrack)
 		end_date = og_end_date - timedelta(days=day_backtrack)
 		
@@ -654,7 +661,7 @@ def get_updated_lots(lzId):
 				if jsonResult.get('objectIdFieldName'):
 					#Result is valid, but there are no objectIds
 					logger.info("[PROCESS] No new lots within {} - {}".format(start_date.strftime('%Y-%m-%d %H:%M:%S'),end_date.strftime('%Y-%m-%d %H:%M:%S')))
-					return 
+					break
 				else:
 					retries_1 += 1
 					print("ERROR no ObjectIds: {}".format(jsonResult))
@@ -707,12 +714,12 @@ def get_updated_lots(lzId):
 						print("Invalid selection. Please enter y or n")
 	#Commit all Lot queries
 	for q in sql:
-		c.execute(q)
+		connection.execute(q)
 		
 	#Update LZ_UPDATE_LOG to indicate all Lot runs complete
-	c.execute("update LZ_UPDATE_LOG set LOT_RUN_COMPLETE = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
+	connection.execute("update LZ_UPDATE_LOG set LOT_RUN_COMPLETE = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lzId))
 	
-	c.execute("commit")
+	connection.execute("commit")
 			
 def intersectLotZone(lzId,layerName):
 	#Tabulate Intersect Lot Layer with current Zone layer
@@ -740,7 +747,8 @@ def intersectLotZone(lzId,layerName):
 			output_path, 
 			"EPI_NAME;EPI_TYPE;SYM_CODE;LAY_CLASS", 
 			None, 
-			"10 Centimeters", 
+			"10 Centimeters",
+			#None,
 			"SQUARE_METERS"
 		)
 
@@ -764,7 +772,7 @@ def intersectLotZone(lzId,layerName):
 
 		sys.exit()
 	
-	connection = pool.acquire() #Acquire connection from pool
+	connection = createSession(config.username, config.password) #Acquire connection from pool
 	#c = connection.cursor()
 
 	logger.info("[PROCESS] Tabulate Intersection complete for lz_update_log_id: {}".format(lzId))
@@ -803,9 +811,9 @@ def insertToUpdate(lzId,layerName,df_lots):
 	for i, row in df_lots.iterrows():
 		#Go through all processed lots and update processed date
 		if query == "":
-			query = "'{}'".format(row["LOTREF"])
+			query = "'{}'".format(row["lotref"])
 		else:
-			query = "{},'{}'".format(query,row["LOTREF"])
+			query = "{},'{}'".format(query,row["lotref"])
 		
 		if (i + 1) % 1000 == 0 or (i + 1) == len(df_lots):
 			#logger.debug("Run SQL: {}".format(query))
@@ -814,7 +822,7 @@ def insertToUpdate(lzId,layerName,df_lots):
 			query = ""
 	
 	#Once all records are inserted, commit
-	c.execute("commit")
+	connection.execute("commit")
 	
 	#Clean up Lot_Zone_to_update layer
 	arcpy.Delete_management("{}\\{}".format(arcFolder,layerName))
@@ -833,15 +841,15 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	#Expire LOT_ZONE records
 	for i, row in df_lz_expire.iterrows():
 		if query == "":
-			query = "{}".format(row["LOT_ZONE_ID"])
+			query = "{}".format(row["lot_zone_id"])
 		else:
-			query = "{},{}".format(query,row["LOT_ZONE_ID"])
+			query = "{},{}".format(query,row["lot_zone_id"])
 
 		if (i + 1) % 1000 == 0 or (i + 1) == len(df_lz_expire):
-			c.execute("update LOT_ZONE set end_date = CURRENT_TIMESTAMP, update_date = CURRENT_TIMESTAMP where lot_zone_id in ({})".format(query))
+			connection.execute("update LOT_ZONE set end_date = CURRENT_TIMESTAMP, update_date = CURRENT_TIMESTAMP where lot_zone_id in ({})".format(query))
 			query = ""
 			
-	c.execute("commit")
+	connection.execute("commit")
 	logger.info("Finished Expiry step")
 	
 	#Check which LZ_TO_UPDATE records do not need to update LOT_ZONE records ##SET ROUNDING FOR SUM_AREA AND PERCENTAGE HERE##
@@ -850,17 +858,17 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	#Update status for records requiring no update
 	for i, row in df_no_update.iterrows():
 		if query == "":
-			query = "{}".format(row["LZ_TO_UPDATE_ID"])
+			query = "{}".format(row["lz_to_update_id"])
 		else:
-			query = "{},{}".format(query,row["LZ_TO_UPDATE_ID"])
+			query = "{},{}".format(query,row["lz_to_update_id"])
 		
 		if (i + 1) % 1000 == 0 or (i + 1) == len(df_no_update):
-			c.execute("update LZ_TO_UPDATE set update_action = 'NO UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id in ({})".format(query))
+			connection.execute("update LZ_TO_UPDATE set update_action = 'NO UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id in ({})".format(query))
 			loadingBar(pc_rd,"{} [{}/{}] No updates required          ".format(loading_msg,(i + 1),len(df_no_update)))
 			#print(i + 1,"/",len(df_no_update)," No updates done", end="\r")
 			query = ""
 			
-	c.execute("commit")
+	connection.execute("commit")
 	logger.info("Finished No Update check")
 	
 	#Check for records where just the sum_area or Percentage need update
@@ -875,24 +883,24 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	for i, row in df_to_update.iterrows():
 		
 		#Build CASE statements for sum_area update
-		sa_query = "{} when {} then {} ".format(sa_query,row["LOT_ZONE_ID"],row["SUM_AREA"])
+		sa_query = "{} when {} then {} ".format(sa_query,row["lot_zone_id"],row["SUM_AREA"])
 		
 		#Build CASE statements for percentage update
-		pc_query = "{} when {} then {} ".format(pc_query,row["LOT_ZONE_ID"],row["PERCENTAGE"])
+		pc_query = "{} when {} then {} ".format(pc_query,row["lot_zone_id"],row["PERCENTAGE"])
 		
 		if lzId_query == "":
-			lzId_query = "{}".format(row["LOT_ZONE_ID"])
+			lzId_query = "{}".format(row["lot_zone_id"])
 		else:
-			lzId_query = "{},{}".format(lzId_query,row["LOT_ZONE_ID"])
+			lzId_query = "{},{}".format(lzId_query,row["lot_zone_id"])
 			
 		if ltu_query == "":
-			ltu_query = "{}".format(row["LZ_TO_UPDATE_ID"])
+			ltu_query = "{}".format(row["lz_to_update_id"])
 		else:
-			ltu_query = "{},{}".format(ltu_query,row["LZ_TO_UPDATE_ID"])
+			ltu_query = "{},{}".format(ltu_query,row["lz_to_update_id"])
 		
 		if (i + 1) % 1000 == 0 or (i + 1) == len(df_to_update):
-			c.execute("update LOT_ZONE set sum_area = case lot_zone_id {} end, percentage = case lot_zone_id {} end, update_date = CURRENT_TIMESTAMP where lot_zone_id in ({})".format(sa_query,pc_query,lzId_query))
-			c.execute("update LZ_TO_UPDATE set update_action = 'UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id in ({})".format(ltu_query))
+			connection.execute("update LOT_ZONE set sum_area = case lot_zone_id {} end, percentage = case lot_zone_id {} end, update_date = CURRENT_TIMESTAMP where lot_zone_id in ({})".format(sa_query,pc_query,lzId_query))
+			connection.execute("update LZ_TO_UPDATE set update_action = 'UPDATE', processed = CURRENT_TIMESTAMP where lz_to_update_id in ({})".format(ltu_query))
 			loadingBar(pc_rd,"{} [{}/{}] Updates done             ".format(loading_msg,(i + 1),len(df_to_update)))
 			#print(i + 1,"/",len(df_to_update)," Updates done", end="\r")
 			sa_query = ""
@@ -900,7 +908,7 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 			lzId_query = ""
 			ltu_query = ""
 			
-	c.execute("commit")
+	connection.execute("commit")
 	logger.info("Finished Update step")
 	
 	#Check for Records from LZ_TO_UPDATE to Insert
@@ -912,26 +920,26 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 	lz_id = getNextId("LOT_ZONE_ID","LOT_ZONE")
 	for i, row in df_to_insert.iterrows():
 		
-		query = "{} into LOT_ZONE (LOT_ZONE_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE, UPDATE_DATE) values ({},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)".format(query,lz_id,row["LOTREF"],row["EPI_NAME"],row["EPI_TYPE"],row["SYM_CODE"],row["LAY_CLASS"],row["SUM_AREA"],row["PERCENTAGE"])
+		query = "{} into LOT_ZONE (LOT_ZONE_ID, LOTREF, EPI_NAME, EPI_TYPE, SYM_CODE, LAY_CLASS, SUM_AREA, PERCENTAGE, CREATE_DATE, UPDATE_DATE) values ({},'{}','{}','{}','{}','{}',{},{},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)".format(query,lz_id,row["lotref"],row["epi_name"],row["epi_type"],row["sym_code"],row["lay_class"],row["sum_area"],row["percentage"])
 		
 		if query2 == "":
-			query2 = "{}".format(row["LZ_TO_UPDATE_ID"])
+			query2 = "{}".format(row["lz_to_update_id"])
 		else:
-			query2 = "{},{}".format(query2,row["LZ_TO_UPDATE_ID"])
+			query2 = "{},{}".format(query2,row["lz_to_update_id"])
 
 		lz_id += 1
 		
 		if (i + 1) % 1000 == 0 or (i + 1) == len(df_to_insert):
 			query = "{} select 1 from dual".format(query)
 			try:
-				c.execute(query)
+				connection.execute(query)
 			except cx_Oracle.Error as error:
 				logger.info("[ERROR] {}".format(error))
 				print(error)
 				
 			query2 = "update LZ_TO_UPDATE set processed = CURRENT_TIMESTAMP, update_action = 'INSERT' where lz_to_update_id in ({})".format(query2)
 			try:
-				c.execute(query2)
+				connection.execute(query2)
 			except cx_Oracle.Error as error:
 				logger.info("[ERROR] {}".format(error))
 				print(error)
@@ -941,26 +949,22 @@ def updateLotZone(lzId,pc_rd,loading_msg):
 			query = "insert all "
 			query2 = ""
 			
-	c.execute("commit")
+	connection.execute("commit")
 	logger.info("Finished Insert step")
 			
 if __name__ == "__main__":
 	
 	# Connect to DB and create session pool
 	try:
-		pool = createSession(config.username, config.password)
+		connection = createSession(config.username, config.password)
 	except RuntimeError as e:
 		logger.error(str(e))
 		print(str(e))
 		sys.exit(1)
-
-	# Acquire connection from the pool
-	connection = pool.acquire()
-	c = connection.cursor()
 	
 	#If set to local, check to see if arcGIS folder is present
 	if h_dir == "C:\\TMP\\Python\\Lot_Zone":
-		source_dir = r"G:\Strategy\GPR\10. Support Applications & Tools\Python\Planning Update by exception\files"
+		source_dir = r"G:\Strategy\GPR\Support Applications & Tools\Python\Planning Update by exception\files"
 		target_dir = r"C:\TMP\Python\Lot_Zone"
 		folder_name = "arcGIS"
 		
@@ -989,34 +993,34 @@ if __name__ == "__main__":
 		loadingBar(2,"20% [Resuming previous update] - Processing unfinished zones...")
 		for i, to_proc in df_zone_to_process.iterrows():
 			
-			logger.info("[PROCESS] Continued processing Zones for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			logger.info("[PROCESS] Continued processing Zones for lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
 			
-			extractLots(to_proc["LZ_UPDATE_LOG_ID"],int(to_proc["TOTAL_RECORDS"]),"[Resuming previous update] - Processing unfinished zones...")
+			extractLots(to_proc["lz_update_log_id"],int(to_proc["total_records"]),"[Resuming previous update] - Processing unfinished zones...")
 	
 	#Check if Lot run for timeframe has been done
 	df_update_lots = pd.read_sql("select lz_update_log_id from LZ_UPDATE_LOG where lot_run_complete is null order by lz_update_log_id",connection)
 	if len(df_update_lots) > 0:
 		loadingBar(3,"30% [Resuming previous update] - Extracting lots updated within time period...       ")
 		for i, to_proc in df_update_lots.iterrows():
-			logger.info("[PROCESS] Continued processing recently updated lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
-			get_updated_lots(to_proc["LZ_UPDATE_LOG_ID"])
+			logger.info("[PROCESS] Continued processing recently updated lots for lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
+			get_updated_lots(to_proc["lz_update_log_id"])
 	
 	#Check if there are unprocessed lots
 	df_lz_to_process = pd.read_sql("select distinct lz_update_log_id from LZ_LOT_SPATIAL where processed is null order by lz_update_log_id",connection)
 	if len(df_lz_to_process) > 0:
 		loadingBar(4,"40% [Resuming previous update] - Extracting spatial data for lots...")
 		for ii, to_proc in df_lz_to_process.iterrows():
-			logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			logger.info("[PROCESS] Continued processing lots for lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
 			
-			df_lots_to_create = pd.read_sql("select lot_run, count(*) total_count from (select min(lot_run) lot_run, lotref from lz_lot_spatial where lz_update_log_id = {} and processed is null group by lotref) group by lot_run order by lot_run".format(to_proc["LZ_UPDATE_LOG_ID"]),connection)
+			df_lots_to_create = pd.read_sql("select lot_run, count(*) total_count from (select min(lot_run) lot_run, lotref from lz_lot_spatial where lz_update_log_id = {} and processed is null group by lotref) group by lot_run order by lot_run".format(to_proc["lz_update_log_id"]),connection)
 		
 			lot_runs = list() #Initialise list of Runs
 			total_lr = 0 #Track total lots so far
 			
 			for i, row in df_lots_to_create.iterrows():
 				
-				lot_runs.append(row["LOT_RUN"]) #Add Lot run to current list
-				total_lr += row["TOTAL_COUNT"]
+				lot_runs.append(row["lot_run"]) #Add Lot run to current list
+				total_lr += row["total_count"]
 				
 				#Progress tracking
 				pc = (i + 1)/len(df_lots_to_create)*40
@@ -1032,8 +1036,8 @@ if __name__ == "__main__":
 						loadingBar(pc_rd,"{}% [Resuming previous update] - Processing final intersect...                                  ".format(int(40 + pc)))
 					
 					total_lztu = 0 #Track how many lz_to_update records need to be inserted
-					df_lots = get_lot_runs(to_proc["LZ_UPDATE_LOG_ID"],lot_runs)
-					LZ_to_insert = "Lot_Zone_to_update_{}_{}_{}".format(to_proc["LZ_UPDATE_LOG_ID"],lot_runs[0],lot_runs[-1])
+					df_lots = get_lot_runs(to_proc["lz_update_log_id"],lot_runs)
+					LZ_to_insert = "Lot_Zone_to_update_{}_{}_{}".format(to_proc["lz_update_log_id"],lot_runs[0],lot_runs[-1])
 					
 					logger.debug("[DEBUG] Checking if {} Exists...".format(LZ_to_insert))
 					
@@ -1041,23 +1045,22 @@ if __name__ == "__main__":
 					if arcpy.Exists("{}\\{}".format(arcFolder,LZ_to_insert)):
 						#Check total number of records
 						total_lztu = int(arcpy.management.GetCount("{}\\{}".format(arcFolder,LZ_to_insert))[0])
-						logger.info("{}\\Lot_Zone_to_update_{}_{}_{} Exists with {} records".format(arcFolder,to_proc["LZ_UPDATE_LOG_ID"],lot_runs[0],lot_runs[-1],total_lztu))
+						logger.info("{}\\Lot_Zone_to_update_{}_{}_{} Exists with {} records".format(arcFolder,to_proc["lz_update_log_id"],lot_runs[0],lot_runs[-1],total_lztu))
 
 					if total_lztu == 0:
-						logger.info("[PROCESS] Processing lots for lz_update_log_id: {} - Lot runs {} - {}".format(to_proc["LZ_UPDATE_LOG_ID"],lot_runs[0],lot_runs[-1]))
+						logger.info("[PROCESS] Processing lots for lz_update_log_id: {} - Lot runs {} - {}".format(to_proc["lz_update_log_id"],lot_runs[0],lot_runs[-1]))
 						#Intersection results not available yet, run intersection
-						createLotLayer(to_proc["LZ_UPDATE_LOG_ID"],LotUrl,lot_runs,df_lots)
+						createLotLayer(to_proc["lz_update_log_id"],LotUrl,lot_runs,df_lots)
 						
-						intersectLotZone(to_proc["LZ_UPDATE_LOG_ID"],LZ_to_insert)
+						intersectLotZone(to_proc["lz_update_log_id"],LZ_to_insert)
 						
 						# Acquire connection from the pool
-						connection = pool.acquire()
-						c = connection.cursor()
+						connection = createSession(config.username, config.password)
 					else:
 						#Not a new Intersect data set, resuming from previous unfinished process
-						logger.info("Continued inserting records to LZ_TO_UPDATE for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+						logger.info("Continued inserting records to LZ_TO_UPDATE for lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
 					
-					insertToUpdate(to_proc["LZ_UPDATE_LOG_ID"],LZ_to_insert,df_lots)
+					insertToUpdate(to_proc["lz_update_log_id"],LZ_to_insert,df_lots)
 					
 					#Reset
 					lot_runs = list()
@@ -1068,27 +1071,27 @@ if __name__ == "__main__":
 	if len(df_lz_to_update) > 0:
 		loading_msg = "90% [Resuming previous update] - Updating Lot Zone table..."
 		for i, to_proc in df_lz_to_update.iterrows():
-			logger.info("[PROCESS] Continued processing LOT_ZONE updates for lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			logger.info("[PROCESS] Continued processing LOT_ZONE updates for lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
 			#sys.exit() #Developing chunk processing for Lot JSON Creation
-			updateLotZone(to_proc["LZ_UPDATE_LOG_ID"],9,loading_msg)
+			updateLotZone(to_proc["lz_update_log_id"],9,loading_msg)
 			
 			#Update Log record as complete
-			c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["LZ_UPDATE_LOG_ID"])) #Update Lot Zone Log to indicate zone is complete
-			c.execute("commit")
-			logger.info("Finished Resumption of lz_update_log_id: {}".format(to_proc["LZ_UPDATE_LOG_ID"]))
+			connection.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(to_proc["lz_update_log_id"])) #Update Lot Zone Log to indicate zone is complete
+			connection.execute("commit")
+			logger.info("Finished Resumption of lz_update_log_id: {}".format(to_proc["lz_update_log_id"]))
 			
 		print("[■■■■■■■■■■] 100% [Resuming previous update]                                                                ")
 		
 	#Get last update date of Lot_Zone
-	c.execute("select max(end_date) from LZ_UPDATE_LOG where finish_date is not null")
-	last_update_tuple = c.fetchone()
+	result = connection.execute("select max(end_date) from LZ_UPDATE_LOG where finish_date is not null")
+	last_update_tuple = result.fetchone()
 
 	if last_update_tuple[0]:
 		last_update = last_update_tuple[0] #Found the last updated Lot Zone phase
 		logger.info("[PROCESS] Last Lot Zone log update found: {}".format(last_update))
 	else:
-		c.execute("select max(update_date) from lot_zone") #No Lot Zone Logs found, use last updated Lot_zone record instead
-		last_update_tuple = c.fetchone()
+		result = connection.execute("select max(update_date) from lot_zone") #No Lot Zone Logs found, use last updated Lot_zone record instead
+		last_update_tuple = result.fetchone()
 		
 		if last_update_tuple[0]:
 			last_update = last_update_tuple[0]
@@ -1098,8 +1101,7 @@ if __name__ == "__main__":
 			print("Unable to retrieve 'last_update' from lot_zone table")
 			sys.exit()
 
-	c.close()
-	pool.release(connection)
+	connection.close()
 	
 	#Set current date
 	current_date = datetime.today()
@@ -1134,18 +1136,21 @@ if __name__ == "__main__":
 		totalRecords = int(arcpy.management.GetCount(LZ_to_update)[0]) #Total Zone records to iterate
 		
 		#Insert lz_update_log record and get ID
-		connection = pool.acquire() #Acquire connection from pool
-		c = connection.cursor()
+		#Reconnect
+		connection = createSession(config.username, config.password)
 		
-		c.execute("insert into LZ_UPDATE_LOG (LZ_UPDATE_LOG_ID,START_DATE,END_DATE,CREATE_DATE,FINISH_DATE,TOTAL_RECORDS,RUN_USER) values (SEQ_LZ_UPDATE_LOG.nextval, TO_DATE('{}', 'yyyy/mm/dd hh24:mi:ss'), TO_DATE('{}', 'yyyy/mm/dd hh24:mi:ss'), CURRENT_TIMESTAMP, null, {}, '{}')".format(last_update.strftime('%Y/%m/%d %H:%M:%S'),end_period.strftime('%Y/%m/%d %H:%M:%S'),totalRecords,username))
-		c.execute("commit")
-		c.execute("SELECT SEQ_LZ_UPDATE_LOG.currval FROM dual")
-		lz_update_log_id = c.fetchone()[0]
+		connection.execute("insert into LZ_UPDATE_LOG (LZ_UPDATE_LOG_ID,START_DATE,END_DATE,CREATE_DATE,FINISH_DATE,TOTAL_RECORDS,RUN_USER) values (SEQ_LZ_UPDATE_LOG.nextval, TO_DATE('{}', 'yyyy/mm/dd hh24:mi:ss'), TO_DATE('{}', 'yyyy/mm/dd hh24:mi:ss'), CURRENT_TIMESTAMP, null, {}, '{}')".format(last_update.strftime('%Y/%m/%d %H:%M:%S'),end_period.strftime('%Y/%m/%d %H:%M:%S'),totalRecords,username))
+		connection.execute("commit")
+		result = connection.execute("SELECT SEQ_LZ_UPDATE_LOG.currval FROM dual")
+		lz_update_log_id = result.fetchone()[0]
 		
 		loadingBar(1,"10% - Extracting BBOX coordinates for each zone...")
 		#Store all Zone Bounding Boxes
 		if totalRecords > 0:
 			nextBiD = getNextId("LZ_ZONE_BBOX_ID","LZ_ZONE_BBOX")
+			
+			# TO DO - INSERT STEP TO SPLICE ZONES, THEN UPDATE FOLLOWING CODE TO GET BBOX OF THOSE SPLICES
+			
 			with arcpy.da.SearchCursor(LZ_to_update,['OID@','SHAPE@','EPI_NAME','LAY_CLASS','SYM_CODE']) as cursor:
 				logger.info("Storing Zone BBOX...")
 				zcount = 0
@@ -1165,13 +1170,13 @@ if __name__ == "__main__":
 						query = "{} select 1 from dual".format(query)
 						
 						try:
-							c.execute(query)
+							connection.execute(query)
 						except cx_Oracle.Error as error:
 							logger.info("[ERROR] {}".format(error))
 							print(error)
 						
 						query = "insert all "
-			c.execute("commit")
+			connection.execute("commit")
 			logger.debug("Inserted {} Zoning records".format(zcount))
 			
 		#print("Last inserted ID:", lz_update_log_id)
@@ -1203,8 +1208,8 @@ if __name__ == "__main__":
 		#if total_lots > 0:
 		for i, row in df_lots_to_create.iterrows():
 			
-			lot_runs.append(row["LOT_RUN"]) #Add Lot run to current list
-			total_lr += row["TOTAL_COUNT"]
+			lot_runs.append(row["lot_run"]) #Add Lot run to current list
+			total_lr += row["total_count"]
 			
 			#Progress tracking
 			pc = (i + 1)/len(df_lots_to_create)*50
@@ -1230,8 +1235,7 @@ if __name__ == "__main__":
 				intersectLotZone(lz_update_log_id,"Lot_Zone_to_update_{}_{}_{}".format(lz_update_log_id,lot_runs[0],lot_runs[-1]))
 
 				# Acquire connection from the pool (long intersects cause timeouts)
-				connection = pool.acquire()
-				c = connection.cursor()
+				connection = createSession(config.username, config.password)
 				
 				#Store Intersected Results to LZ_TO_UPDATE
 				insertToUpdate(lz_update_log_id,"Lot_Zone_to_update_{}_{}_{}".format(lz_update_log_id,lot_runs[0],lot_runs[-1]),df_lots)
@@ -1249,11 +1253,10 @@ if __name__ == "__main__":
 		print("[PROCESS] Finished updating Lot Zones for {} -> {}".format(last_update,end_period))
 		
 		#Update Log record as complete
-		c.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lz_update_log_id)) #Update Lot Zone Log to indicate zone is complete
-		c.execute("commit")
+		connection.execute("update LZ_UPDATE_LOG set finish_date = CURRENT_TIMESTAMP where lz_update_log_id = {}".format(lz_update_log_id)) #Update Lot Zone Log to indicate zone is complete
+		connection.execute("commit")
 		
-		c.close()
-		pool.release(connection)
+		connection.close()
 		
 		#Delete layer to release lock
 		if arcpy.Exists(LZ_to_update):
