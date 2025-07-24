@@ -3,6 +3,7 @@
 	v1a - Unable to make tabulation work with lot layer (no OID)
 	v2 - New version, processes Zones in 30 (or custom via day_chunk variable) day chunks
 	v3 - Updated for new Python Environment - Converted SQL calls to use SQLAlchemy
+	v4 - Added Dice step to break up Zones into smaller BBOX areas
 '''
 
 import logging
@@ -984,6 +985,7 @@ if __name__ == "__main__":
 	elif env_mode == "UAT":
 		arcFolder = "{}\\arcGIS\\test.gdb".format(h_dir)
 	LZ_to_update = "{}\\LandZoning_to_update".format(arcFolder)
+	LZ_to_update_dice = "{}\\LandZoning_to_update_dice".format(arcFolder)
 	logger.info("[PROCESS] Connected to Planning SDE")
 	
 	loadingBar(0,"0% - Checking for unfinished updates...")
@@ -1150,9 +1152,16 @@ if __name__ == "__main__":
 		if totalRecords > 0:
 			nextBiD = getNextId("LZ_ZONE_BBOX_ID","LZ_ZONE_BBOX")
 			
-			# TO DO - INSERT STEP TO SPLICE ZONES, THEN UPDATE FOLLOWING CODE TO GET BBOX OF THOSE SPLICES
+			# v4 - Dice Zoning shapes to reduce BBOX sizes
+			arcpy.management.Dice(
+				in_features=LZ_to_update,
+				out_feature_class=LZ_to_update_dice,
+				vertex_limit=20
+			)
 			
-			with arcpy.da.SearchCursor(LZ_to_update,['OID@','SHAPE@','EPI_NAME','LAY_CLASS','SYM_CODE']) as cursor:
+			totalDiceRecords = int(arcpy.management.GetCount(LZ_to_update_dice)[0]) #Total Zone records to iterate
+			
+			with arcpy.da.SearchCursor(LZ_to_update_dice,['OID@','SHAPE@','EPI_NAME','LAY_CLASS','SYM_CODE']) as cursor:
 				logger.info("Storing Zone BBOX...")
 				zcount = 0
 				query = "insert all "
@@ -1166,7 +1175,7 @@ if __name__ == "__main__":
 					zcount += 1
 					nextBiD += 1
 					
-					if zcount % 1000 == 0 or zcount == totalRecords:
+					if zcount % 1000 == 0 or zcount == totalDiceRecords:
 						#Insert records every 1000
 						query = "{} select 1 from dual".format(query)
 						
@@ -1184,16 +1193,16 @@ if __name__ == "__main__":
 		
 		loadingBar(2,"20% - Extracting Lots for each zone...            ")
 		#TO-DO CHANGE TO ITERATE THROUGH BBOX RECORDS TO EXTRACT LOTS
-		if totalRecords > 0:
+		if totalDiceRecords > 0:
 			#GET LOTS FOR EACH ZONE SHAPE
 			
 			logger.info("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))
 			#print("[PROCESS] Processing Zones for {} -> {}".format(last_update, end_period))
-			logger.debug("Total records are {}".format(totalRecords))
+			logger.debug("Total records are {}".format(totalDiceRecords))
 			
 			#Go through each record in LandZoning_to_update and find intersected lots
-			logger.debug("Going through Zone layers...")
-			extractLots(lz_update_log_id, totalRecords, "- Extracting Lots for each zone...      ")
+			logger.debug("Going through Zone bbox layers...")
+			extractLots(lz_update_log_id, totalDiceRecords, "- Extracting Lots for each zone bbox...      ")
 		
 		loadingBar(3,"30% - Extracting Lots updated within time period...")
 		#Get updated lots within time frame
@@ -1260,9 +1269,10 @@ if __name__ == "__main__":
 		connection.close()
 		
 		#Delete layer to release lock
-		if arcpy.Exists(LZ_to_update):
-			logger.info("[PROCESS] Deleting {}".format(LZ_to_update))
-			arcpy.Delete_management(LZ_to_update)
+		if env_mode == "PROD":
+			if arcpy.Exists(LZ_to_update):
+				logger.info("[PROCESS] Deleting {}".format(LZ_to_update))
+				arcpy.Delete_management(LZ_to_update)
 		
 		#Finished Zoning chunk, set up for next x days
 		last_update = end_period
